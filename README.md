@@ -137,6 +137,37 @@ The worker runs `ingest_and_extract`, tracking every run in the `job_run` table;
 are marked `error` and stay queryable via `JobRunService.errors(...)` — a visible error
 queue that works even when Redis is down (the DB is the record of truth).
 
+---
+
+## MGA Submission Triage (Phase 2 — first workflow)
+
+The first real workflow lives entirely in `verticals/mga/` (decision core + `submission_triage`
+package) and reuses every shared service. Routes under `/api/mga/submission-triage`.
+
+```powershell
+alembic upgrade head           # includes mga_appetite_result
+python src/core/seed.py        # demo-mga tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+Run the pipeline over fixture submissions, then read the inbox + a detail (headers required):
+```powershell
+$h = @{ "x-tenant-id"="demo-mga"; "x-user-id"="demo-mga-junior"; "x-role"="junior" }
+# trigger triage for a fixture submission (prod: the Arq ingestion job does this)
+Invoke-RestMethod -Method Post -Headers $h "http://localhost:4000/api/mga/submission-triage/run?message_id=submission_01"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/mga/submission-triage"                 # inbox list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/mga/submission-triage/<id>"            # TriageDetail
+# human action (approve within JUNIOR_PREMIUM_CAP; send = request-info; escalate)
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"action":"approve","amount":50000}' "http://localhost:4000/api/mga/submission-triage/<id>/act"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_submission_triage.md](docs/FE_CONTRACT_submission_triage.md).
+
+### Run the triage eval (all 10 Workflow_1 submissions vs the dataset spec)
+```powershell
+pytest src/verticals/mga/submission_triage/eval_test.py -v
+```
+
 ### Run the end-to-end smoke test
 Proves the full pipeline on the **real Workflow_1 fixtures** (requires `TEST_DATA_ROOT`):
 ingest(mock) → extract → rules → (stub decision) → review item → audit entry, plus a

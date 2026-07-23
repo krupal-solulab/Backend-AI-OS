@@ -62,7 +62,7 @@ namespace_packages = true
 # by Alembic autogenerate + the seed/loader at runtime, so skip type-checking them rather
 # than rabbit-hole on SQLModel typing.
 [[tool.mypy.overrides]]
-module = ["core.models", "core.models.*"]
+module = ["core.models", "core.models.*", "verticals.mga.models"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -76,10 +76,12 @@ module = ["migrations.*"]
 ignore_errors = true
 
 # Tests use pytest fixtures/monkeypatch; don't require full annotations there.
+# In-package workflow eval tests (verticals/**/eval_test.py) are tests too.
 [[tool.mypy.overrides]]
-module = ["tests.*"]
+module = ["tests.*", "verticals.mga.submission_triage.eval_test"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
 module = ["aiosqlite.*", "sqlmodel.*"]
@@ -89,4 +91,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "src/verticals"]
+python_files = ["test_*.py", "*_test.py"]

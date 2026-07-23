@@ -6,6 +6,8 @@ The MGA developer mounts each workflow here with a single ``include_router(...)`
 
 from fastapi import APIRouter
 
+from verticals.mga.submission_triage import router as submission_triage_router
+
 router = APIRouter(prefix="/api/mga", tags=["mga"])
 
-# Phase 2+: router.include_router(submission_triage_router)
+router.include_router(submission_triage_router)
