@@ -1,0 +1,51 @@
+{
+  "category": "mga_submission_triage_validation",
+  "rules": [
+    {
+      "id": "doc.acord.required",
+      "label": "ACORD application present",
+      "field": "documents.acord.present",
+      "check": "required",
+      "severity": "error",
+      "message": "ACORD application is missing",
+      "enabled": true
+    },
+    {
+      "id": "doc.loss_run.required",
+      "label": "Loss run present",
+      "field": "documents.loss_run.present",
+      "check": "required",
+      "severity": "error",
+      "message": "Loss run is missing",
+      "enabled": true
+    },
+    {
+      "id": "doc.financials.required",
+      "label": "Financial statement present",
+      "field": "documents.financials.present",
+      "check": "required",
+      "severity": "error",
+      "message": "Financial statement is missing",
+      "enabled": true
+    },
+    {
+      "id": "acord.named_insured.required",
+      "label": "Named insured present",
+      "field": "acord.named_insured",
+      "check": "required",
+      "severity": "error",
+      "message": "Named insured is missing",
+      "enabled": true
+    },
+    {
+      "id": "acord.fein.format",
+      "label": "FEIN format NN-NNNNNNN",
+      "field": "acord.fein",
+      "check": "regex",
+      "params": { "pattern": "^\\d{2}-\\d{7}$" },
+      "severity": "warn",
+      "message": "FEIN not in NN-NNNNNNN format",
+      "enabled": true
+    }
+  ]
+}

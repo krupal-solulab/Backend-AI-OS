@@ -55,3 +55,45 @@ ruff check .; mypy src; pytest
 ```
 Production async worker (needs Redis): `arq core.jobs.worker.WorkerSettings` (with `src` on
 `PYTHONPATH`).
+
+## Phase 2 — MGA Submission Triage (2026-07-23) ✅
+
+First real workflow + the MGA decision core, entirely under `verticals/mga/` (+ one additive
+migration). `verticals/es/` untouched; `core/common` contracts unchanged (frozen).
+
+**What was built**
+- **Step 0 — extraction tuning** (additive, `core/extraction`): canonical `loss_run.total_incurred`
+  (+ `_period`) and `sov.total_insurable_value`; repeating rows → `loss_run.claims` /
+  `sov.locations` lists (no last-wins collapse); `coerce_number` for currency/qualified values;
+  illegibility confidence heuristic. Proven in `tests/test_extraction_tuning.py`.
+- **Step 1 — `verticals/mga/decision_core`** (Appetite Engine): EC-01 (manual review) → hard rules
+  HR-01..04 (short-circuit DECLINE before LLM, FR-23) → completeness CR-01..04 → consistency
+  CC-01/02 + SOV/limit → timing TR-01 → trend LT-02. Thresholds are data (`AppetiteConfig`).
+  Transparent 0–100 score.
+- **Step 2 — rule sets as data**: `verticals/mga/rulesets/workflow1_validation.json` (6-check
+  Rules-Console shape) + `ensure_ruleset` loader (RuleSet→RuleVersion, published).
+- **Step 3 — `verticals/mga/submission_triage`**: pipeline service + routes
+  (`/api/mga/submission-triage` list / `{id}` detail / `{id}/act` / `run`); registered in the MGA
+  vertical router. `TriageDetail`/`Submission` response schemas map 1:1 to MGA-FE.
+- **MGA table**: additive `mga_appetite_result` (migration `dfddb1e69297`); `verticals/mga/models`
+  registered in `migrations/env.py` so `alembic check` stays clean.
+- **Step 4 — eval** (`verticals/mga/submission_triage/eval_test.py`): all 10 Workflow_1 submissions
+  match the dataset's expected recommendation (01/06/10 PROCEED, 02/04/05/07/09 REQUEST_INFO,
+  03 DECLINE on HR-01+HR-02, 08 manual review), plus RBAC/authority-cap checks.
+
+**Key decisions / deviations** (all pre-approved)
+- Compound appetite logic is MGA code with data thresholds (Option A); frozen `RuleCheckType`
+  untouched. submission_08 manual review = `REQUEST_INFO` + `details.manual_review` +
+  `MANUAL_REVIEW` flag (no new enum). `act` verbs = approve / send (=request-info, human-only,
+  no auto-send) / escalate (frozen `ReviewAction`). Score model documented in `decision_core`.
+- One infra touch outside `verticals/mga/`: added `import verticals.mga.models` to
+  `migrations/env.py` (required so the new table is in `target_metadata` and `alembic check`
+  passes). `act` keys off the submission id (what the FE has), resolving the review item server-side.
+
+**How to run**
+```powershell
+alembic upgrade head; python src/core/seed.py
+pytest src/verticals/mga/submission_triage/eval_test.py -v      # the eval
+uvicorn main:app --app-dir src --port 4000                       # then POST /run, GET list/detail, POST /act
+```
+FE wiring spec: `docs/FE_CONTRACT_submission_triage.md`.

@@ -45,6 +45,13 @@ Shared entities (in `core/common`):
 `Tenant`, `User`, `Submission`, `Document`, `ExtractedField`, `RuleSet`/`RuleVersion`, `Decision`, `OutputPackage`, `ReviewItem`, `AuditEntry`, `Connection` (Nango).
 Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `BindOrder`, `Bordereau`; E&S `Market`, `QuoteComparison`, `DiligentSearch`).
 
+> **Phase 2 status:** the MGA Decision Core (Appetite Engine) + Submission Triage workflow are
+> built (`verticals/mga/`). The Appetite Engine maps validation `RuleResult[]` + the extracted
+> model → the frozen `Decision`. Simple validation is data (6-check rule sets via the shared
+> engine); compound appetite logic (excluded class, compound severity, cross-doc variance/
+> disclosure, timing, loss-trend, extraction-confidence → manual review) lives in the decision
+> core with thresholds as data. `verticals/es/` is untouched.
+
 ## 6. API namespacing (prevents collisions)
 ```
 /api/core/...                       shared (documents, audit, rules, review)

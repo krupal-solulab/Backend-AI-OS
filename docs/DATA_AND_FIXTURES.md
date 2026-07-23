@@ -56,6 +56,7 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 - The `Validation_Rules_*.md` in each dataset is the **expected-outcome spec** for that workflow's eval — treat it as the acceptance test.
 - Ingestion in production uses **Nango (Gmail)**; fixtures are the offline equivalent so devs don't need a live mailbox to build.
 - **Phase 1 consumers:** `MockConnectorService` serves these fixtures offline; `DefaultExtractionService` parses them into a cited field model; and the smoke-test validation rule set lives in `tests/fixtures/ruleset_workflow1.json` (loaded into a `RuleVersion` at test setup — the JSON form of the expected-outcome spec). "Required document present" is enforced there as `required` rules, so submission_09's missing financials surfaces as missing-info / `REQUEST_INFO`.
+- **Phase 2 (Submission Triage):** the acceptance test is `verticals/mga/submission_triage/eval_test.py`, which asserts all 10 submissions match the **Expected Recommendation** column of this dataset's README. Validation rules are data (`verticals/mga/rulesets/workflow1_validation.json`); appetite thresholds (excluded class, severity ceiling, variance %, lead-time, confidence floor, etc.) are data in `verticals/mga/decision_core/config.py` — all placeholders from `Validation_Rules_Test_Dataset.md`, to be replaced with the design partner's real appetite guide.
 
 ## `.env`
 ```
