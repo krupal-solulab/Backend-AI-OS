@@ -6,21 +6,21 @@ Delivery is sequenced so the **shared core lands first**, then **two developers 
 
 ## Phase 0 — Foundations *(shared · unlocks parallel work)*
 **Goal:** repo + skeleton so two devs can start immediately.
-- **0.1** Repo, pnpm, NestJS skeleton, ESLint/Prettier, CI.
-- **0.2** Postgres + Prisma; base schema (`Tenant` w/ `vertical`, `User`, `Submission`, `Document`, `RuleSet`, `Decision`, `AuditEntry`, `ReviewItem`, `Connection`).
+- **0.1** Repo, uv (or Poetry), FastAPI skeleton, ruff + mypy, CI.
+- **0.2** Postgres + SQLModel/SQLAlchemy + Alembic; base schema (`Tenant` w/ `vertical`, `User`, `Submission`, `Document`, `RuleSet`/`RuleVersion`, `Decision`, `AuditEntry`, `ReviewItem`, `Connection`).
 - **0.3** `tenancy` + `auth` (RBAC roles, authority limits, guards).
 - **0.4** **Freeze `core/common` contracts** (interfaces/DTOs) — the pipeline interface every workflow implements. *This is the gate that lets everyone work in parallel.*
 - **0.5** `fixtures` loader wired to `TEST_DATA_ROOT` (see DATA_AND_FIXTURES.md).
 - **0.6** Nango account + `ingestion`/`ConnectorService` skeleton (mock mode ok).
-**Exit:** `pnpm dev` boots; a dummy `/api/core/health` works; contracts merged.
+**Exit:** `fastapi dev` (uvicorn) boots; a dummy `/api/core/health` works; contracts merged.
 
 ## Phase 1 — Shared Core *(build once · the big investment)*
 **Goal:** the whole engine every workflow reuses.
 - **1.1** `extraction` — classification + extraction to a cited field model (start with `.txt` fixtures, add OCR later).
 - **1.2** `rules-engine` — generic evaluator + versioning (publish/rollback) + the 6 check types.
-- **1.3** `llm` — Claude wrapper (grounded, cited, model-tier routing).
+- **1.3** `llm` — OpenAI wrapper behind `LLMService` (grounded, cited, model-tier routing).
 - **1.4** `documents`, `review-queue`, `audit`, `reporting` frameworks.
-- **1.5** `jobs` — BullMQ ingestion→extraction pipeline + error queue.
+- **1.5** `jobs` — Celery ingestion→extraction pipeline + error queue.
 - **1.6** `ingestion` real Nango: read inbox, fetch attachments, send mail.
 **Exit:** a fixture email can flow ingest → extract → rules → (stub decision) → review item → audit, end to end.
 
@@ -65,22 +65,22 @@ Phase 5 (write-back) needs a design partner's PAS.
 The foundation is built by one dev, pushed to Git, then pulled and verified by the team before anyone starts a workflow. It's "done" when all of the below pass.
 
 **Phase 0 — Foundations**
-- [ ] App boots (`pnpm dev`); `/api/core/health` responds.
-- [ ] Postgres + Prisma with base tables: `Tenant` (with `vertical`), `User`, `Submission`, `Document`, `RuleSet`/`RuleVersion`, `Decision`, `OutputPackage`, `ReviewItem`, `AuditEntry`, `Connection`.
+- [ ] App boots (`fastapi dev` / uvicorn); `/api/core/health` responds.
+- [ ] Postgres + SQLModel/Alembic with base tables: `Tenant` (with `vertical`), `User`, `Submission`, `Document`, `RuleSet`/`RuleVersion`, `Decision`, `OutputPackage`, `ReviewItem`, `AuditEntry`, `Connection`.
 - [ ] `tenancy` + `auth` working: roles `junior`/`senior`/`admin`, authority limit, a guard that scopes by tenant + vertical.
 - [ ] **Contracts in `core/common`** — `WorkflowPipeline` interface + shared DTOs — exist and compile.
 - [ ] Fixtures loader reads `TEST_DATA_ROOT` and turns `Workflow_1/submission_XX/` into `Submission` + `Document[]`.
 - [ ] Folder skeleton matches `FOLDER_STRUCTURE.md` (empty `verticals/mga` + `verticals/es`).
 
 **Phase 1 — Shared Core**
-- [ ] Modules present + interfaced: `extraction`, `rules-engine` (6 check types + publish/rollback versioning), `llm` (Claude wrapper: grounded, cited, tier-routed), `documents`, `review-queue`, `audit`, `reporting`, `jobs`, `ingestion` (Nango + `mock` mode).
+- [ ] Modules present + interfaced: `extraction`, `rules-engine` (6 check types + publish/rollback versioning), `llm` (OpenAI wrapper: grounded, cited, tier-routed), `documents`, `review-queue`, `audit`, `reporting`, `jobs`, `ingestion` (Nango + `mock` mode).
 - [ ] **Smoke test:** a fixture email → ingest → extract → rules → (stub decision) → review item → audit entry, end to end.
 
 ## Handoff & verification flow
 ```
 Teammate builds Phase 0 + 1  →  push to Git
         │
-You pull  →  pnpm i && pnpm dev  →  run the DoD checklist + smoke test
+You pull  →  uv sync && fastapi dev  →  run the DoD checklist + smoke test
         │
 30-min CONTRACT REVIEW together  →  confirm core/common is generic for BOTH
         │   verticals (appetite AND matching), not just MGA  →  lock contracts

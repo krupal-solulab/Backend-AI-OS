@@ -10,11 +10,11 @@ Every workflow, in either vertical, is assembled from these. Each exposes a **st
 | **documents** | Store/retrieve raw docs + metadata; classification confidence | `save()`, `get()`, `listForSubmission()` | extraction, all detail views |
 | **extraction** | Classify each doc; extract a **cited** structured field model | `classify(doc)`, `extract(doc) → ExtractedField[]` | all workflows |
 | **rules-engine** | Generic, versioned rule evaluator. Runs **validation** rules (per document) and **appetite/matching** rules (config-driven). Check types: `required · regex · min · max · compare · crossDoc` | `evaluate(ruleSet, data) → Result[]`; `publish/rollback(version)` | triage, renewal, endorsement, governance |
-| **llm** | Claude wrapper: grounded generation, citation-enforced, model-tier routing | `draft(prompt, facts) → { text, citations }` | narratives, comms, summaries |
+| **llm** | OpenAI wrapper (behind an `LLMService` interface): grounded, citation-enforced, model-tier routing | `draft(prompt, facts) -> { text, citations }` | narratives, comms, summaries |
 | **review-queue** | Items awaiting a human; role-based actions; status | `enqueue(item)`, `act(itemId, action, user)` | every workflow output |
 | **audit** | Immutable decision/audit log (AI + human), the source for Governance & Portfolio | `record(entry)`, `query(filter)` | every decision; #8/#9 read it |
 | **reporting** | Aggregation/rollup framework over audit + entities | `rollup(dimension, period)` | portfolio, pipeline, governance |
-| **jobs** | BullMQ queues + workers; error queue for failed processing | `enqueueJob()`, worker registration | ingestion, extraction |
+| **jobs** | Celery/Redis queues + workers; error queue for failed processing | `enqueue_job()`, worker registration | ingestion, extraction |
 | **common** | Shared DTOs / entities / interfaces (the **contracts**) | types only | everything |
 
 ## The Rules Engine is the key shared trick

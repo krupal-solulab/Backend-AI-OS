@@ -8,7 +8,7 @@
 5. **Everything is grounded + audited.** Every AI claim cites a source; every decision is written to the audit log.
 
 ## 2. Modular monolith
-A single deployable NestJS app made of independent modules. This gives us microservice-style **ownership boundaries** (each workflow is its own module) without the ops cost. Split into services later only if needed.
+A single deployable FastAPI app made of independent packages (one router per workflow). This gives us microservice-style **ownership boundaries** (each workflow is its own package) without the ops cost. Split into services later only if needed.
 
 ```
 AppModule
@@ -57,7 +57,7 @@ A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 All Google/Gmail access goes through a shared `ConnectorService` wrapping Nango — never direct Google SDKs in workflow code. See CONNECTORS_NANGO.md.
 
 ## 8. LLM layer
-A shared `LlmService` wraps Anthropic Claude with a strict "use only provided facts / cite sources" contract. Model tiers by task: a fast model (Sonnet/Haiku class) for routine drafting/classification, a stronger model (Opus class) for hard reasoning or sensitive drafts. Workflows never call the SDK directly — they call `LlmService`.
+A shared `LLMService` wraps **OpenAI** with a strict "use only provided facts / cite sources" contract, behind an `LLMProvider` interface so the model stays a config choice. Model tiers by task: a fast model for routine drafting/classification, a stronger one for hard reasoning or sensitive drafts. Workflows never call the SDK directly — they call `LLMService`.
 
 ## 9. Async processing
-Ingestion + extraction run as **BullMQ jobs** (email arrival → queue → process → output ready), so the API stays responsive and failed processing lands in a visible **error queue**, never dropped.
+Ingestion + extraction run as **Celery jobs on Redis** (email arrival → queue → process → output ready), so the API stays responsive and failed processing lands in a visible **error queue**, never dropped.

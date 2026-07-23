@@ -5,15 +5,15 @@ The goal: once the shared core exists, **Dev A builds MGA Submission Triage** an
 ## The 5 rules
 1. **Contracts are frozen first (Phase 0.4).** The pipeline interface + shared DTOs live in `core/common` and are agreed before workflow work starts. Everyone codes against them. Changing a contract = a deliberate, reviewed event, not an ad-hoc edit.
 2. **One folder per workflow, one owner.** A workflow lives entirely in `verticals/{vertical}/workflows/{workflow}/`. You only edit files inside your folder.
-3. **Register in your own vertical module only.** To mount a workflow you add one line to **your** `mga.module.ts` *or* `es.module.ts`. Different files → no conflict between the two verticals. (Within a vertical, keep imports alphabetical to minimize same-file churn, or use an auto-registering barrel.)
+3. **Register in your own vertical router only.** To mount a workflow you add one `include_router(...)` line to **your** `verticals/mga/router.py` *or* `verticals/es/router.py`. Different files → no conflict between the two verticals. (Within a vertical, keep the includes ordered to minimize same-file churn.)
 4. **Never cross verticals.** MGA dev doesn't touch `verticals/es/**`; E&S dev doesn't touch `verticals/mga/**`. Neither edits `core/**` (that's the lead's, post-Phase-1).
 5. **Depend on interfaces, not implementations.** Get shared capability via DI (`ExtractionService`, `RulesEngine`, `LlmService`, `ConnectorService`, `AuditService`, `ReviewQueueService`). If the core lacks something, request a contract addition — don't fork the core inside a workflow.
 
 ## What each dev touches for a new workflow
 ```
-✎  verticals/<vertical>/workflows/<workflow>/**        (new folder — yours)
-✎  verticals/<vertical>/<vertical>.module.ts           (one import line — your vertical only)
-✎  prisma/schema.prisma  → only if you need new tables (namespace them, own migration)
+✎  verticals/<vertical>/workflows/<workflow>/**        (new package — yours)
+✎  verticals/<vertical>/router.py                      (one include_router line — your vertical only)
+✎  models + Alembic migration  → only if you need new tables (namespace them, own migration)
 ✎  fixtures + eval for your workflow
 ✗  core/**            (don't)
 ✗  the other vertical  (don't)

@@ -24,13 +24,13 @@ This lets **two developers work in parallel with zero conflict** — one on MGA 
 | [docs/CONNECTORS_NANGO.md](docs/CONNECTORS_NANGO.md) | Gmail / Sheets / Drive via Nango |
 
 ## Tech stack (proposed)
-- **Node.js + TypeScript**, **NestJS** (modular monolith — one NestJS *module* per workflow = clean ownership boundaries).
-- **PostgreSQL + Prisma** (data), **Redis + BullMQ** (async ingestion/processing jobs).
-- **Anthropic Claude** for the LLM layer (drafting/narrative, citation-enforced).
+- **Python + FastAPI** (modular monolith — one package/router per workflow = clean ownership boundaries).
+- **PostgreSQL + SQLModel/SQLAlchemy + Alembic** (data), **Redis + Celery** (async ingestion/processing jobs).
+- **OpenAI** for the LLM layer (drafting/narrative/classification, citation-enforced), behind an `LLMService` wrapper so the model is a config choice.
 - **Nango** for all Google/Gmail connectors (read mail + attachments, send mail, Sheets/Drive read-write).
-- **Zod** for schema validation, **pnpm** workspace.
+- **Pydantic v2** for schemas/contracts; **uv** (or Poetry), **pytest**, **ruff**, **mypy** (strict).
 
-> NestJS is chosen specifically because its module system makes parallel work safe — see PARALLEL_WORK.md. Fastify + a manual module layout is a fine alternative if the team prefers.
+> FastAPI + package-per-workflow keeps parallel work safe — see PARALLEL_WORK.md. The LLM sits behind an interface, so the model/provider is a config choice, never wired into workflow code.
 
 ## One-minute mental model
 ```

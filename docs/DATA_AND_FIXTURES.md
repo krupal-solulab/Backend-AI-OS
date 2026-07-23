@@ -40,11 +40,11 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | … | E&S workflows continue (agree numbering with the E&S dev) |
 > Keep this table in sync as datasets are added.
 
-## How the loader works (`src/fixtures/fixtures.service.ts`)
+## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.
-- `loadWorkflow(n)` → scans `Workflow_<n>/test_dataset/submission_*`, turns each folder into a `Submission` + `Document[]` (one `Document` per `.txt`, `kind` inferred from filename: `acord_application`→ACORD, `loss_run`→Loss Run, `financial_statement`→Financials, `email`→Email).
-- `loadRules(n)` → reads `Validation_Rules_Test_Dataset.md` (and any `rules.json`) so tests can assert expected pass/fail + recommendation.
-- Used by: **dev seed script** (populate a local DB to click through the FE) and **workflow eval tests**.
+- `load_workflow(n)` → scans `Workflow_<n>/test_dataset/submission_*`, turns each folder into a `Submission` + `list[Document]` (one `Document` per `.txt`, `kind` inferred from filename: `acord_application`→ACORD, `loss_run`→Loss Run, `financial_statement`→Financials, `email`→Email).
+- `load_rules(n)` → reads `Validation_Rules_Test_Dataset.md` (and any `rules.json`) so tests can assert expected pass/fail + recommendation.
+- Used by: **dev seed script** (populate a local DB to click through the FE) and **workflow eval tests** (pytest).
 
 ## Rules
 - **Never hardcode fixtures inside workflow code** — always go through the loader, so swapping datasets doesn't touch code.
