@@ -159,3 +159,56 @@ pytest src/verticals/mga/submission_triage/eval_test.py -v      # the eval
 uvicorn main:app --app-dir src --port 4000                       # then POST /run, GET list/detail, POST /act
 ```
 FE wiring spec: `docs/FE_CONTRACT_submission_triage.md`.
+
+## Frontend Integration — Submission Market Matching (2026-07-23) ✅
+
+**Scope:** first live frontend↔backend wiring for this project — the `Insurance OS` repo
+(TanStack Start, the E&S/wholesale-broker FE)'s `/app/workflows/submission-matching` screen
+wired end-to-end to `/api/es/market-matching`. Every other FE screen (the other 9 workflow
+screens, both foundation screens, analytics/assistant/settings, the marketing site) stays on
+mock data (`simulateRequest`), untouched.
+
+**What was built**
+- **CORS** — `CORSMiddleware` added to `src/main.py`, allowing the FE's Lovable-sandboxed dev
+  origin `http://localhost:8080` (pinned by `@lovable.dev/vite-tanstack-config`, not
+  configurable via the FE's own `vite.config.ts`). Credentials disabled — Phase-0 header-stub
+  auth carries no cookies.
+- **Payload typing fix** — `verticals/es/workflows/market_matching/router.py`'s
+  `ReviewItemOut.payload` was `dict[str, object] | None`; retyped to the real
+  `MarketMatchingPayload` so the FE's OpenAPI-generated client gets accurate types instead of
+  `Record<string, unknown>`. No behavior change.
+- **FE-side (Insurance OS repo)**: `.env.local`/`.env.example` (`VITE_API_BASE_URL` + demo
+  header-stub auth stand-in — `demo-es` / `demo-es-junior` / `junior`, the seeded ES tenant from
+  `core/seed.py`), `src/lib/api/schema.d.ts` (generated via `openapi-typescript` against
+  `/openapi.json`), `src/lib/api/client.ts` (single fetch wrapper: attaches the 3 stub headers,
+  unwraps FastAPI's `{"detail": ...}` into a plain `Error`), `src/lib/api/marketMatching.ts`
+  (typed list/detail/run/act calls).
+- **Screen rewrite**: `SubmissionMarketMatching` + its 5 tabs now use React Query against the
+  real API. Sections the API has no data for (document list/citations, per-carrier
+  hard-exclusion/soft-score breakdown, LLM narrative, per-state diligent search, submission
+  metadata like insured name/TIV/premium) show an explicit "not available yet" panel naming the
+  missing endpoint/field, rather than fabricated numbers.
+
+**Key decisions/deviations**
+- Chose to wire only what the API actually returns and stub the rest explicitly, rather than
+  expanding the ES schema/service to backfill the FE mock's full field set (narrative+citations,
+  per-carrier requirements checklist, capacity/premium/turnaround, per-state diligent search) —
+  a bigger, separate piece of work if wanted later.
+- Inbox lists the real Workflow_10 fixture submissions (`submission_01..06`) via a "Run batch
+  matching" button that POSTs `/run` for any not yet processed — there's no submission-upload
+  endpoint, so this is the closed set the FE can drive today.
+
+**Verification**
+- Backend: `ruff check .` / `mypy src` clean; `pytest tests/test_es_market_matching.py` 9/9 pass.
+- Frontend: `tsc --noEmit` clean; `eslint` clean (one pre-existing, unrelated `no-explicit-any`
+  in a shared `Button` helper, untouched); `npm run build` succeeds.
+- Dataset alignment confirmed: `Data sets/Workflow 1/market_matching_dataset` is byte-identical
+  to the `TEST_DATA_ROOT/Workflow_10/test_dataset` fixtures the backend actually reads (only an
+  added doc file differs). All 6 submissions' live API output matches the dataset README's
+  documented "Expected Ranking Output" exactly, including both edge cases (partial-fit ranking
+  on #01, true zero-match + diligent-search flag on #06).
+- Manual round-trip: listed → ran all 6 fixtures → detail fetch → `escalate` succeeded (200,
+  status updated) → `override` correctly 403'd for the junior demo role.
+
+FE integration code lives in the `Insurance OS` repo: `src/lib/api/{client,marketMatching,schema.d}.ts`
+and `src/components/app/Workflows.tsx` (`SubmissionMarketMatching` + its tabs).

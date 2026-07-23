@@ -93,6 +93,11 @@ curl http://localhost:4000/api/core/health      # -> {"phase":0}
 ```
 Interactive docs at http://localhost:4000/docs.
 
+### CORS (dev)
+`CORSMiddleware` allows `http://localhost:8080` — the Lovable-sandboxed dev origin for the
+`Insurance OS` frontend (pinned by `@lovable.dev/vite-tanstack-config`, not its own
+`vite.config.ts`). Add any other FE dev origin to `src/main.py` if you're running one.
+
 ### Header-stub auth (Phase 0)
 There is no login flow. Tenant/user/role come from request headers; `vertical` is looked
 up from the tenant (with an `x-vertical` fallback):

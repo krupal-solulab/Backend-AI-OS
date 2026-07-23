@@ -24,6 +24,7 @@ from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
 from core.tenancy.dependencies import get_ctx
+from verticals.es.workflows.market_matching.schema import MarketMatchingPayload
 from verticals.es.workflows.market_matching.service import (
     DEFAULT_WORKFLOW_N,
     WORKFLOW_NAME,
@@ -58,7 +59,7 @@ class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
     status: str
-    payload: dict[str, object] | None = None
+    payload: MarketMatchingPayload | None = None
 
 
 @router.post("/run", status_code=status.HTTP_201_CREATED)
