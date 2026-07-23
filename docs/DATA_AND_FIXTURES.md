@@ -41,8 +41,19 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 7 | MGA · Bind Order & Issuance |
 | 8 | MGA · Appetite Governance |
 | 9 | MGA · Portfolio |
-| … | E&S workflows continue (agree numbering with the E&S dev) |
+| 10 | E&S · Market Matching |
+| … | Further E&S workflows continue from 11 |
 > Keep this table in sync as datasets are added.
+
+### Workflow_10 (E&S Market Matching) layout note
+This dataset additionally ships a `carrier_profiles/` folder (6 JSON carrier
+appetite profiles — not `.txt` submission documents). `src/fixtures/loader.py`
+ignores it (its glob only matches `submission_*`); it's loaded separately by
+`verticals/es/decision_core/carrier_profiles.py`, which is E&S-owned, not
+shared fixtures code. It also ships `RULE_ENGINE_INTERPRETATION_GUIDE.md`
+alongside `Validation_Rules_Test_Dataset.md` (the former is the detailed
+rule-by-rule spec; the latter consolidates the expected-outcome table per
+convention).
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

@@ -55,3 +55,66 @@ ruff check .; mypy src; pytest
 ```
 Production async worker (needs Redis): `arq core.jobs.worker.WorkerSettings` (with `src` on
 `PYTHONPATH`).
+
+## Phase 2B — E&S Market Matching ✅ (2026-07-23)
+
+**Scope:** first E&S workflow, `verticals/es/**` only — `core/**` and `verticals/mga/**`
+untouched (confirmed via `git status`; MGA router still an empty `@router` with no
+`include_router` calls).
+
+**What was built**
+- `verticals/es/decision_core/carrier_profiles.py` — loads the 6-carrier panel from
+  `Workflow_<n>/test_dataset/carrier_profiles/*.json` (E&S-owned; the shared
+  `fixtures.loader` has no notion of a carrier panel and ignores this folder).
+- `verticals/es/decision_core/matching.py` — the Matching/Ranking Engine implementing
+  MM-01..MM-07 (see the dataset's `RULE_ENGINE_INTERPRETATION_GUIDE.md`) as three tiers:
+  hard exclusion (class/state/premium-band), soft scoring (severity/completeness), and
+  the independent MM-07 diligent-search flag. **Hybrid design**: premium-band and
+  loss-run-years/required-doc checks route through the SHARED `core.rules_engine` — one
+  `RuleSet`/`RuleVersion` **per carrier** (`seed_rules.py`), matching CORE_MODULES.md's
+  "carrier-appetite rule sets as data" pattern. Semantic class-code scope matching,
+  multi-state licensing, the per-class severity hard/soft distinction, the weighted
+  composite score, and MM-07 are native Python here — they don't reduce cleanly to the
+  generic evaluator's 6 field checks.
+- `verticals/es/workflows/market_matching/` — `service.py` (`MarketMatchingPipeline`
+  implementing `WorkflowPipeline[OutputPackage]`), `schema.py` (FE payload shape),
+  `router.py` (`/api/es/market-matching/...`: run, list, detail, approve/override/
+  escalate/send/issue), registered via one line in `verticals/es/router.py`.
+- `tests/test_es_market_matching.py` — eval against the REAL dataset (see below), plus a
+  synthetic missing-ACORD case proving the `REQUEST_INFO` path.
+
+**Dataset:** `Workflow_10` (E&S · Market Matching — added to DATA_AND_FIXTURES.md's
+mapping table), copied from the provided `Data sets/Workflow 1/market_matching_dataset/`
+into `TEST_DATA_ROOT/Workflow_10/test_dataset/` unchanged, plus an authored
+`Validation_Rules_Test_Dataset.md` consolidating the dataset's own README + interpretation
+guide into the standard filename.
+
+**Key decisions / deviations**
+- Rule-set JSON authored against the REAL, current `core.rules_engine` shape
+  (`params.value` for min/max, plain `required` for doc-presence) — not the originally
+  "locked" `params.min`/`params.max`/`field2`/`{against,tolerancePct}` shape, since
+  `core/rules_engine` is frozen/off-limits to this task and was never built to that spec.
+- `Decision.outcome`: `PROCEED` when ≥1 carrier matches (even with per-carrier missing-info
+  flags — the guide is explicit that completeness gaps must never suppress ranking),
+  `DECLINE` for a true zero-match panel (submission_06), `REQUEST_INFO` only when the
+  ACORD itself is missing (no class code/premium to match against ANY carrier — a
+  submission-level validation gate, separate from per-carrier appetite).
+- **Documented dataset/guide discrepancy** (not silently resolved): the interpretation
+  guide's summary table says submission_04 excludes Ironclad for "trucking not accepted,"
+  but `carrier_03_ironclad.json` actually accepts `trucking - non-hazmat` with the premium
+  in-band — the real exclusion driver is MM-05 severity ($1.85M claim vs. its $500K
+  ceiling), which for a non-roofing class is a soft factor per the guide's own text. This
+  implementation lets Ironclad appear, score-penalized, rather than inventing an
+  undocumented hard rule to match the guide's prose. See
+  `Workflow_10/test_dataset/Validation_Rules_Test_Dataset.md`.
+- No per-carrier `ceiling_type` (hard/soft) field exists in the source profiles despite the
+  guide recommending one — implemented as "hard for roofing classes, soft elsewhere,"
+  directly from the guide's own worked example, rather than fabricating carrier data.
+
+**Verification:** `ruff check .` / `mypy src` / `alembic check` all clean; app boots,
+`/api/core/health` still `{"phase":0}`; all 6 real submissions match the dataset's expected
+rankings/exclusions (incl. zero-match + the one documented deviation above); synthetic
+missing-ACORD → `REQUEST_INFO` case passes; full pipeline (ingest→extract→decide→draft→
+package→review_queue→audit) passes end to end. Pre-existing, unrelated: 5 MGA tests
+(`test_smoke_pipeline.py`, `test_jobs_async.py`) fail on this machine because the real
+Workflow_1 MGA dataset isn't present at `TEST_DATA_ROOT` here — untouched by this work.
