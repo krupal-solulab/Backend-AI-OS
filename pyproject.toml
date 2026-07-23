@@ -76,9 +76,10 @@ module = ["migrations.*"]
 ignore_errors = true
 
 # Tests use pytest fixtures/monkeypatch; don't require full annotations there.
-# In-package workflow eval tests (verticals/**/eval_test.py) are tests too.
+# `*.eval_test` matches every in-package workflow eval (verticals/**/eval_test.py) for BOTH
+# verticals, so adding a new workflow never requires editing this file again.
 [[tool.mypy.overrides]]
-module = ["tests.*", "verticals.mga.submission_triage.eval_test"]
+module = ["tests.*", "*.eval_test"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false

@@ -97,3 +97,13 @@ pytest src/verticals/mga/submission_triage/eval_test.py -v      # the eval
 uvicorn main:app --app-dir src --port 4000                       # then POST /run, GET list/detail, POST /act
 ```
 FE wiring spec: `docs/FE_CONTRACT_submission_triage.md`.
+
+## Parallel-work conventions (MGA + E&S fully independent)
+- **Contracts frozen** (`core/common`); each vertical owns `verticals/<v>/**` + its own vertical router.
+- **`migrations/env.py` auto-discovers** every `verticals/*/models.py` — no shared edit to add tables.
+- **`pyproject.toml` needs no per-workflow edits**: the mypy override `*.eval_test` covers every
+  in-package eval for both verticals.
+- **Migrations / multiple heads:** independent migrations from the same parent create two Alembic
+  heads. After integrating, `alembic heads`; if two, `alembic merge heads -m "..."` then
+  `alembic upgrade head`. Prefer **branch-per-workflow + PR** so `main` advances conflict-free.
+- Net: day-to-day development needs no cross-vertical pulls; sync only to land on shared `main`.
