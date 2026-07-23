@@ -1,0 +1,82 @@
+{
+  "category": "submission_validation",
+  "rules": [
+    {
+      "id": "doc.acord.required",
+      "label": "ACORD application present",
+      "field": "documents.acord.present",
+      "check": "required",
+      "severity": "error",
+      "message": "ACORD application is missing",
+      "enabled": true
+    },
+    {
+      "id": "doc.financials.required",
+      "label": "Financial statement present",
+      "field": "documents.financials.present",
+      "check": "required",
+      "severity": "error",
+      "message": "Financial statement is missing",
+      "enabled": true
+    },
+    {
+      "id": "doc.loss_run.required",
+      "label": "Loss run present",
+      "field": "documents.loss_run.present",
+      "check": "required",
+      "severity": "error",
+      "message": "Loss run is missing",
+      "enabled": true
+    },
+    {
+      "id": "acord.fein.format",
+      "label": "FEIN format NN-NNNNNNN",
+      "field": "acord.fein",
+      "check": "regex",
+      "params": { "pattern": "^\\d{2}-\\d{7}$" },
+      "severity": "warn",
+      "message": "FEIN not in NN-NNNNNNN format",
+      "enabled": true
+    },
+    {
+      "id": "acord.revenue.min",
+      "label": "Minimum stated annual revenue",
+      "field": "acord.stated_annual_revenue",
+      "check": "min",
+      "params": { "value": 100000 },
+      "severity": "warn",
+      "message": "Stated annual revenue below minimum appetite",
+      "enabled": true
+    },
+    {
+      "id": "acord.employees.max",
+      "label": "Maximum employees for appetite",
+      "field": "acord.number_of_employees",
+      "check": "max",
+      "params": { "value": 500 },
+      "severity": "warn",
+      "message": "Employee count above appetite ceiling",
+      "enabled": true
+    },
+    {
+      "id": "xdoc.named_insured.match",
+      "label": "Named insured matches loss run",
+      "field": "acord.named_insured",
+      "check": "crossDoc",
+      "params": { "field": "loss_run.named_insured", "op": "==" },
+      "severity": "warn",
+      "message": "Named insured differs between ACORD and loss run",
+      "enabled": true
+    },
+    {
+      "id": "acord.revenue.compare",
+      "label": "Stated revenue >= financials revenue",
+      "field": "acord.stated_annual_revenue",
+      "check": "compare",
+      "params": { "field": "financials.total_revenue", "op": ">=" },
+      "severity": "info",
+      "message": "Stated revenue is lower than financials revenue",
+      "enabled": true
+    }
+  ]
+}

@@ -60,4 +60,4 @@ All Google/Gmail access goes through a shared `ConnectorService` wrapping Nango 
 A shared `LLMService` wraps **OpenAI** with a strict "use only provided facts / cite sources" contract, behind an `LLMProvider` interface so the model stays a config choice. Model tiers by task: a fast model for routine drafting/classification, a stronger one for hard reasoning or sensitive drafts. Workflows never call the SDK directly — they call `LLMService`.
 
 ## 9. Async processing
-Ingestion + extraction run as **Celery jobs on Redis** (email arrival → queue → process → output ready), so the API stays responsive and failed processing lands in a visible **error queue**, never dropped.
+Ingestion + extraction run as **Arq jobs on Redis** (async-native; chosen over Celery) — email arrival → queue → process → output ready — so the API stays responsive. Every run is tracked in the `job_run` table; failed processing is marked `error` and lands in a visible, **queryable error queue** (`JobRunService.errors`), never dropped. Because the DB records job state, the error queue is inspectable even when Redis is down.

@@ -1,0 +1,92 @@
+[project]
+name = "insurance-be"
+version = "0.0.0"
+description = "Insurance OS backend — shared core for MGA + E&S verticals (Phase 0 skeleton)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "sqlmodel>=0.0.21",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "openai>=1.30",
+    "arq>=0.26",
+    "redis>=5.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ── Ruff ─────────────────────────────────────────────
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py312"
+# Alembic-generated revisions are machine-authored; don't lint their long enum lines.
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
+ignore = ["B008"]  # FastAPI Depends() in defaults is idiomatic
+
+# ── mypy (pragmatic-strict) ──────────────────────────
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+strict = true
+plugins = ["pydantic.mypy"]
+explicit_package_bases = true
+namespace_packages = true
+
+# SQLModel table classes fight strict mypy (Field() overloads); the models are exercised
+# by Alembic autogenerate + the seed/loader at runtime, so skip type-checking them rather
+# than rabbit-hole on SQLModel typing.
+[[tool.mypy.overrides]]
+module = ["core.models", "core.models.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["core.db", "core.seed"]
+disallow_untyped_defs = false
+disallow_any_generics = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = ["migrations.*"]
+ignore_errors = true
+
+# Tests use pytest fixtures/monkeypatch; don't require full annotations there.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["aiosqlite.*", "sqlmodel.*"]
+ignore_missing_imports = true
+
+# ── pytest ───────────────────────────────────────────
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]

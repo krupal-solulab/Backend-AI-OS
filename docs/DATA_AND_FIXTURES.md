@@ -25,6 +25,10 @@ Workflow_1/test_dataset/
 ```
 Each `submission_XX/` = one broker submission: the cover **email** + its **attachments** (ACORD application, loss run, financials). Later workflows add SOV, endorsement request, renewal questionnaire, etc.
 
+> **Document sets are VARIABLE — do not assume exactly 4 docs.** In the real Workflow_1 data, most submissions have 4 (`acord_application`, `email`, `financial_statement`, `loss_run`) but some differ: `submission_06` adds `sov_report` (5 docs) and `submission_09` includes `sov_report` but has **no** `financial_statement` (4 docs, different mix). Submissions may therefore have **2–5+ docs**. Two consequences:
+> - The fixtures loader stays **tolerant**: it loads whatever `.txt` files exist and classifies each by filename — it never requires a fixed set. `sov` (`sov_report` → SOV) is a **supported document kind**.
+> - "Required document present" is a **data-driven VALIDATION RULE in Phase 1** (a `required`/`crossDoc` check in the Rules Engine → surfaces as **missing-info / `REQUEST_INFO`**), **NOT** loader logic. The loader reports what's there; the rules decide what's missing.
+
 ## Mapping: workflow → dataset number
 | N | Vertical · Workflow |
 |---|---|
@@ -51,6 +55,7 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 - Filenames drive document classification in the loader — keep the `acord_application / loss_run / financial_statement / email / sov / ...` naming consistent across datasets.
 - The `Validation_Rules_*.md` in each dataset is the **expected-outcome spec** for that workflow's eval — treat it as the acceptance test.
 - Ingestion in production uses **Nango (Gmail)**; fixtures are the offline equivalent so devs don't need a live mailbox to build.
+- **Phase 1 consumers:** `MockConnectorService` serves these fixtures offline; `DefaultExtractionService` parses them into a cited field model; and the smoke-test validation rule set lives in `tests/fixtures/ruleset_workflow1.json` (loaded into a `RuleVersion` at test setup — the JSON form of the expected-outcome spec). "Required document present" is enforced there as `required` rules, so submission_09's missing financials surfaces as missing-info / `REQUEST_INFO`.
 
 ## `.env`
 ```
