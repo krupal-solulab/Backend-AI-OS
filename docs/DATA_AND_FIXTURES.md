@@ -33,7 +33,7 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | N | Vertical · Workflow |
 |---|---|
 | 1 | MGA · Submission Triage |
-| 2 | MGA · Renewal Management |
+| 2 | MGA · Renewal Management — dataset folder is `Workflow_2/renewal_dataset/` (not `test_dataset`); cases are `renewal_01…07` with `prior_policy_snapshot` + `renewal_questionnaire` (new doc types) |
 | 3 | MGA · Bordereau |
 | 4 | MGA · Broker Communication |
 | 5 | MGA · Quoting & Rating |
@@ -57,7 +57,7 @@ convention).
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.
-- `load_workflow(n)` → scans `Workflow_<n>/test_dataset/submission_*`, turns each folder into a `Submission` + `list[Document]` (one `Document` per `.txt`, `kind` inferred from filename: `acord_application`→ACORD, `loss_run`→Loss Run, `financial_statement`→Financials, `email`→Email).
+- `load_workflow(n)` → resolves the dataset folder tolerantly (**`test_dataset`** else the single **`*_dataset`** subfolder, e.g. Workflow_2's `renewal_dataset`), then turns each **case subfolder** (any name — `submission_XX`, `renewal_XX`, …) into a `Submission` + `list[Document]` (one `Document` per `.txt`, `kind` inferred from filename). Unknown filenames (e.g. `prior_policy_snapshot`, `renewal_questionnaire`) load as `kind=OTHER`; the consuming workflow namespaces them (the frozen `DocumentKind` enum is not extended).
 - `load_rules(n)` → reads `Validation_Rules_Test_Dataset.md` (and any `rules.json`) so tests can assert expected pass/fail + recommendation.
 - Used by: **dev seed script** (populate a local DB to click through the FE) and **workflow eval tests** (pytest).
 

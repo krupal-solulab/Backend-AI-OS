@@ -169,3 +169,28 @@ FE wiring spec: `docs/FE_CONTRACT_submission_triage.md`.
   heads. After integrating, `alembic heads`; if two, `alembic merge heads -m "..."` then
   `alembic upgrade head`. Prefer **branch-per-workflow + PR** so `main` advances conflict-free.
 - Net: day-to-day development needs no cross-vertical pulls; sync only to land on shared `main`.
+
+## Phase 2 — MGA Renewal Management (Workflow_2) ✅ (2026-07-24)
+Second MGA workflow, built entirely in `verticals/mga/renewal_management/**` + one additive
+migration. `core/common` frozen; `verticals/es` untouched.
+- **Extraction (workflow-local):** reuses the shared Extraction Core for recognized docs and
+  parses the two new doc types (`prior_policy_snapshot`, `renewal_questionnaire`) namespaced
+  `prior_policy.*` / `renewal_questionnaire.*` — `DocumentKind` stays frozen (they load as OTHER).
+- **Decision core:** `RenewalComparisonEngine` implements RN-01..RN-12 with all thresholds in
+  `RenewalConfig` (data); the RN-09 appetite recheck reuses MGA `AppetiteConfig` data. Maps the
+  frozen `Decision` → FE `RenewalRecommendation` in the workflow layer (RENEW_AS_IS /
+  RENEW_WITH_CHANGES / NON_RENEW; REQUEST_INFO surfaced as needsInfo/missingInfo — no new enum).
+- **Rules as data:** `renewal_validation` rule set (RuleSet→RuleVersion), resolved by published
+  version at runtime. Eval proves publishing a stricter v2 changes a case's result with no code edit.
+- **Routes:** `/api/mga/renewal` (list/detail/run/act); human-in-the-loop, no auto-send.
+- **Table:** additive `mga_renewal_result` (migration `519cf2c22908`); `alembic check` clean, single head.
+- **Loader:** now tolerant of the dataset subfolder (`test_dataset` | `*_dataset`) and any case-folder
+  naming — Workflow_1 unaffected.
+- **Config note:** RN-02 decline threshold set to 15% (PRD placeholder was 25%) so the dataset's
+  20.6%-decline case (renewal_06) is caught — pure config, retune freely.
+- **Eval:** 8 tests green — all 7 cases match the PRD/README expected recommendations, plus a
+  synthesized missing-doc REQUEST_INFO case and the rule-version-change proof.
+
+How to run: `alembic upgrade head; python src/core/seed.py; uvicorn main:app --app-dir src --port 4000`,
+then `pytest src/verticals/mga/renewal_management/eval_test.py -v`. FE spec:
+`docs/FE_CONTRACT_renewal_management.md`.

@@ -168,6 +168,23 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest src/verticals/mga/submission_triage/eval_test.py -v
 ```
 
+## Running (Phase 2 — MGA Renewal Management, Workflow_2)
+Second MGA workflow: compares the expiring term (prior policy) vs the current renewal
+(questionnaire + updated loss run/financials), maps RN-01..RN-12 → `RENEW_AS_IS` /
+`RENEW_WITH_CHANGES` / `NON_RENEW` (+ retention + lapse-risk). Routes under `/api/mga/renewal`.
+Reuses the shared core + MGA `AppetiteConfig` (for the RN-09 recheck); `verticals/es` untouched.
+```powershell
+alembic upgrade head          # adds mga_renewal_result
+python src/core/seed.py
+uvicorn main:app --app-dir src --port 4000
+curl -X POST -H "x-tenant-id: demo-mga" -H "x-user-id: demo-mga-senior" -H "x-role: senior" `
+  "http://localhost:4000/api/mga/renewal/run?message_id=renewal_03"
+curl -H "x-tenant-id: demo-mga" -H "x-user-id: demo-mga-senior" -H "x-role: senior" `
+  http://localhost:4000/api/mga/renewal
+pytest src/verticals/mga/renewal_management/eval_test.py -v     # eval (7 cases + rule-version proof)
+```
+FE wiring spec: [docs/FE_CONTRACT_renewal_management.md](docs/FE_CONTRACT_renewal_management.md).
+
 ### Run the end-to-end smoke test
 Proves the full pipeline on the **real Workflow_1 fixtures** (requires `TEST_DATA_ROOT`):
 ingest(mock) → extract → rules → (stub decision) → review item → audit entry, plus a

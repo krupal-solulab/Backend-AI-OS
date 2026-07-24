@@ -51,6 +51,11 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 > engine); compound appetite logic (excluded class, compound severity, cross-doc variance/
 > disclosure, timing, loss-trend, extraction-confidence → manual review) lives in the decision
 > core with thresholds as data. `verticals/es/` is untouched.
+>
+> **+ MGA Renewal Management (Workflow_2)** is built the same way (`verticals/mga/renewal_management/`):
+> a Renewal Comparison Engine (RN-01..RN-12, thresholds as `RenewalConfig` data; RN-09 reuses the
+> Appetite Engine's `AppetiteConfig` data) maps the frozen `Decision` → the FE `RenewalRecommendation`
+> in the workflow layer. Routes under `/api/mga/renewal`. Still no `core/common` or `verticals/es` changes.
 
 ## 6. API namespacing (prevents collisions)
 ```
