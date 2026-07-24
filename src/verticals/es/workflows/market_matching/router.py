@@ -61,6 +61,12 @@ class ReviewItemOut(BaseModel):
     payload: dict[str, object] | None = None
 
 
+class DocumentOut(BaseModel):
+    filename: str
+    kind: str
+    content: str
+
+
 @router.post("/run", status_code=status.HTTP_201_CREATED)
 async def run_market_matching(body: RunRequest, ctx: CtxDep, session: SessionDep) -> ReviewItemOut:
     """Runs the full pipeline for one submission and enqueues the result for
@@ -116,6 +122,28 @@ async def get_market_matching(item_id: str, ctx: CtxDep, session: SessionDep) ->
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value, payload=payload
     )
+
+
+@router.get("/{item_id}/documents", response_model=list[DocumentOut])
+async def list_documents(
+    item_id: str, ctx: CtxDep, session: SessionDep
+) -> list[DocumentOut]:
+    """The raw documents `ingest()` persisted via `LocalDocumentStore` for this
+    submission — real fixture content, not extracted/cited fields (see
+    core/extraction for that)."""
+    item = (
+        await session.execute(
+            select(ReviewItemRow).where(
+                col(ReviewItemRow.id) == item_id, col(ReviewItemRow.tenant_id) == ctx.tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+    if item is None or item.submission_id is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"no market-matching review item '{item_id}'"
+        )
+    docs = await LocalDocumentStore().list_for_submission(session, ctx, item.submission_id)
+    return [DocumentOut(filename=d.filename, kind=d.kind.value, content=d.content) for d in docs]
 
 
 async def _act(

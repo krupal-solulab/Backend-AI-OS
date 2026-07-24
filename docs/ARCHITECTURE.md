@@ -51,12 +51,29 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 > engine); compound appetite logic (excluded class, compound severity, cross-doc variance/
 > disclosure, timing, loss-trend, extraction-confidence → manual review) lives in the decision
 > core with thresholds as data. `verticals/es/` is untouched.
+>
+> **Phase 2B/3 status (E&S):** two workflows built in `verticals/es/`, both under the same
+> Option-A pattern — data-driven checks through the shared rules engine where they genuinely
+> fit, compound cross-field logic native in the workflow's own code otherwise:
+> - **Market Matching** (`workflows/market_matching/`) — the Matching/Ranking decision core;
+>   one `RuleSet` per carrier (premium band, loss-run years, required docs) through the shared
+>   engine; semantic class-scope matching, severity hard/soft, and the weighted composite score
+>   are native.
+> - **Package Assembly** (`workflows/package_assembly/`) — consumes Market Matching's output
+>   directly (no re-matching); PA-01..PA-07 (document completeness, the auto-fill grounding
+>   boundary, three-state package status, carrier-tailored cover letters) are entirely native —
+>   nothing here fits the generic 6-check engine. Notably, it re-derives the underlying
+>   submission's `ExtractedModel` via the same shared `ExtractionService` (a documented,
+>   deliberate exception to "no re-extraction" — see `submission_resolver.py` — because Market
+>   Matching doesn't persist `ExtractedField` rows anywhere queryable yet).
+>
+> MGA's `verticals/mga/` is untouched by either.
 
 ## 6. API namespacing (prevents collisions)
 ```
 /api/core/...                       shared (documents, audit, rules, review)
 /api/mga/{workflow}/...             e.g. /api/mga/submission-triage
-/api/es/{workflow}/...              e.g. /api/es/market-matching
+/api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

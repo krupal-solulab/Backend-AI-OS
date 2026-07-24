@@ -181,3 +181,35 @@ pytest tests/test_smoke_pipeline.py tests/test_jobs_async.py -v
 pytest
 ```
 
+## E&S Package Assembly (Phase 3 — second E&S workflow)
+
+Consumes a Market Matching decision directly (carrier selection +
+requirements) and assembles a carrier-specific submission package — document
+completeness, grounded supplemental-form auto-fill, a tailored cover letter,
+and a `READY`/`READY_WITH_GAP`/`BLOCKED` status per carrier. No new
+extraction, no re-matching. Routes under `/api/es/package-assembly`; lives
+entirely in `verticals/es/workflows/package_assembly/` — see
+`docs/DATA_AND_FIXTURES.md`'s Workflow_11 note for why its fixtures aren't
+`submission_*/*.txt` like every other workflow's.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+# assemble a package for one scenario/carrier (omit carrier_id to fan out
+# across every carrier the broker selected):
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_04"}' "http://localhost:4000/api/es/package-assembly/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/package-assembly"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/package-assembly/<id>"   # detail
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_package_assembly.md](docs/FE_CONTRACT_package_assembly.md).
+
+### Run the eval (all 6 real Workflow_11 scenarios, incl. the mandatory Scenario 04 release gate)
+```powershell
+pytest tests/test_es_package_assembly.py -v
+```
+

@@ -42,7 +42,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 8 | MGA · Appetite Governance |
 | 9 | MGA · Portfolio |
 | 10 | E&S · Market Matching |
-| … | Further E&S workflows continue from 11 |
+| 11 | E&S · Package Assembly |
+| … | Further E&S workflows continue from 12 |
 > Keep this table in sync as datasets are added.
 
 ### Workflow_10 (E&S Market Matching) layout note
@@ -54,6 +55,22 @@ shared fixtures code. It also ships `RULE_ENGINE_INTERPRETATION_GUIDE.md`
 alongside `Validation_Rules_Test_Dataset.md` (the former is the detailed
 rule-by-rule spec; the latter consolidates the expected-outcome table per
 convention).
+
+### Workflow_11 (E&S Package Assembly) layout note
+This dataset does NOT follow the `submission_XX/*.txt` shape at all —
+`src/fixtures/loader.py` doesn't apply here (its glob matches `submission_*`,
+not `scenario_*`, and it turns `.txt` files into `Document` rows, which this
+workflow doesn't ingest). Each `scenario_XX/` folder ships a
+`market_matching_output.json` (the previous workflow's decision output —
+carrier selection, requirements, upstream missing-info/diligent-search) and
+an `expected_package_manifest.txt` (the human-readable acceptance spec for
+that scenario). Loaded by
+`verticals/es/workflows/package_assembly/scenario_loader.py`, which is
+E&S-owned, not shared fixtures code — same precedent as Workflow_10's
+`carrier_profiles/`. This workflow also resolves the underlying Workflow_10
+submission (by matching `named_insured`) to re-derive field-level extracted
+data the scenario JSON doesn't inline — see that folder's
+`Validation_Rules_Test_Dataset.md` for why.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.
