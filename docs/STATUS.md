@@ -159,8 +159,6 @@ pytest src/verticals/mga/submission_triage/eval_test.py -v      # the eval
 uvicorn main:app --app-dir src --port 4000                       # then POST /run, GET list/detail, POST /act
 ```
 FE wiring spec: `docs/FE_CONTRACT_submission_triage.md`.
-<<<<<<< Updated upstream
-=======
 
 ## Frontend Integration — Submission Market Matching (2026-07-23) ✅
 
@@ -353,4 +351,185 @@ return 409 with the documented detail message on a BLOCKED package and succeed o
 ones. SSR smoke test across all 18 frontend routes (both live workflows + the 9 still-mocked
 screens + marketing site) returned 200 with no errors — Market Matching's live data and every
 other screen's mock behavior confirmed unchanged.
->>>>>>> Stashed changes
+
+## Phase 3 — E&S Retail Agent Communication Copilot ✅ (2026-07-24)
+
+**Scope:** third E&S workflow, `verticals/es/workflows/agent_communication/**` only. No
+migration (reuses `Decision`/`OutputPackage`/`AuditEntry`, same as Package Assembly);
+`core/common` and `verticals/mga/**` confirmed untouched via `git status`.
+
+**What was built**
+- `drafting.py` — the native Option-A engine: deterministic `trigger_type` classification
+  (reading the field the upstream object already carries — PRD's own §5.2 mapping, not an
+  inferred classifier), RA-TN tone/framing instruction selection per type, the compliance-gate
+  determination (`requires_compliance_review` true only for `NO_MARKET_FOUND`, per RA-TN-06),
+  `carrier_names_disclosed` (false only for that same type — every other type names its
+  carrier(s) by design), and native subject-line templates for 5 of the 6 types. Nothing here
+  fits the generic 6-check rules engine — it's routing logic, not a data-driven check.
+- `subject_resolver.py` — FR-10's thread-reuse mechanic for `NO_RESPONSE_FOLLOWUP`: looks up the
+  actual persisted prior draft's subject line in this workflow's own history first (DB lookup by
+  `submission_id` + original `trigger_type` + carrier), falling back to a deterministic
+  `"Re: ..."` reconstruction only if no matching prior draft exists.
+- `service.py` — `AgentCommunicationPipeline`. Unlike either prior E&S workflow, this one does no
+  fresh extraction/ingestion at all — its input is already the fully structured output of an
+  upstream workflow or a manually-logged trigger (PRD §1/FR-2); `ingest()`/`extract()` are a thin
+  pass-through. Takes an `AsyncSession` in its constructor (like Market Matching, unlike Package
+  Assembly) since `decide()` needs it for the subject-line lookup. Every `DecisionOutcome` maps to
+  `PROCEED` — the FE-facing gating signal is `payload.requires_compliance_review` directly, not
+  the decision outcome (avoids a redundant second signal, per the pre-build discussion).
+- `router.py` — `/api/es/agent-communication`: `run`, list, detail, `approve`/`edit`/`send`, plus
+  two genuinely new endpoints working around frozen-enum gaps *without touching core/common*:
+  - `POST /{id}/discard` — `ReviewStatus` has no "discarded" value, so this flips the workflow's
+    own `payload.status` instead of routing through `review_queue.act()`.
+  - `POST /{id}/compliance-clear` — `ReviewAction` has no "compliance sign-off" value; senior/admin
+    only, flips `payload.requires_compliance_review` directly, logged to the audit trail.
+  Also enforces two dedup rules server-side, not left as FE conventions: **FR-5** (no duplicate
+  draft for an unresolved trigger — returns the existing item with `deduplicated: true`) and
+  **FR-12** (at most one `NO_RESPONSE_FOLLOWUP` ever per original request — HTTP 409 on a second
+  attempt, checked across ALL statuses, not just pending).
+- `tests/test_es_agent_communication.py` — all 6 real Workflow_12 triggers (structural/behavioral
+  assertions, not literal-text matching against `expected_draft.txt`, since LLM/mock-LLM phrasing
+  varies), plus dedicated tests for FR-5, FR-12, and the full compliance-gate flow (blocked →
+  junior clear forbidden → senior clear → approve succeeds).
+
+**Dataset:** `Workflow_12` (E&S · Retail Agent Communication — added to
+DATA_AND_FIXTURES.md's mapping table), copied from `Data sets/Workflow 3/retail_comm_dataset/`
+into `TEST_DATA_ROOT/Workflow_12/test_dataset/` unchanged.
+
+**Key decisions / deviations (pre-approved)**
+- Compliance-gate clearance: a dedicated router-only `compliance-clear` endpoint rather than
+  reusing `ReviewAction.OVERRIDE`'s existing (unrelated) meaning.
+- FR-10 subject-line reuse: DB lookup of the actual prior draft, with a deterministic fallback —
+  not always-deterministic reconstruction (more correct when a prior draft genuinely exists,
+  degrades gracefully when it doesn't).
+- `DecisionOutcome`: all `PROCEED` — `payload.requires_compliance_review` is the FE's real gating
+  signal, avoiding a redundant second one.
+- No migration — same reasoning as Package Assembly.
+- Subject lines are generated **natively** (templated), not by the LLM — consistent with PRD §8's
+  own "tone/framing selection is deterministic routing, not an LLM judgment call" principle; the
+  LLM only drafts the free-form body.
+- Scope note: PRD FR-15 names exactly three broker actions (Approve & Send / Edit then Send /
+  Discard) — this router implements exactly that set (`approve`, `send`, `edit`, `discard`) and
+  does not add `override`/`escalate`/`issue` endpoints, since nothing in this PRD calls for them.
+
+**Verification:** `ruff check .` clean; `mypy src` clean (78 files); `pytest
+tests/test_es_agent_communication.py` 11/11 pass; full E&S suite (market_matching +
+package_assembly + agent_communication) 27/27 pass together. `alembic heads` still shows one
+head; `alembic check` reports no drift. `core/common`/`verticals/mga` confirmed byte-identical
+via `git status`. Live: app boots, `/api/core/health` → `{"phase":0}`, all four vertical route
+groups (`market-matching`, `package-assembly`, `agent-communication`, `submission-triage`) return
+200. Live end-to-end `POST /run` against real Trigger 04 verified against the mock LLM's actual
+output. Live compliance-gate flow exercised end to end: `approve` on a fresh No Market Found
+draft → 409 → junior `compliance-clear` → 403 → senior `compliance-clear` → 200 → `approve` → 200.
+
+**Incidental fix:** `docs/STATUS.md` had a leftover, never-cleaned-up git stash-conflict marker
+(`<<<<<<< Updated upstream` / `=======` / `>>>>>>> Stashed changes`, spanning lines 162-354) from
+an earlier session — the "upstream" side was empty and the "stashed" side held all the real
+Market Matching FE-integration content, so resolving it was just removing the three marker lines
+(zero content lost). Flagging this rather than silently leaving broken markdown in the repo.
+
+### Addendum — Frontend Integration (2026-07-24)
+
+Wired `Insurance OS`'s `/app/workflows/agent-copilot` screen to this workflow — with one
+structural difference from Market Matching/Package Assembly's FE integrations, explained below.
+
+**What changed**
+- FE: `src/lib/api/agentCommunication.ts` (typed run/list/detail/approve/edit/send/discard/
+  compliance-clear calls, reusing `client.ts`), embedding the 6 real `Workflow_12` trigger
+  objects verbatim (there's no fixture-ref shorthand at the API level here — `POST /run` takes
+  the full trigger object, unlike `submission_ref`/`scenario_ref` — so the FE-known "ref" is the
+  whole JSON body, copied byte-for-byte from `trigger_XX/trigger_input.json`).
+- Added a new `LiveDraftsSection` to the existing (otherwise-untouched) `RetailAgentCopilot`
+  screen: run any of the 6 triggers, real inbox, real detail (subject/body, persistent
+  compliance-review banner, carrier-disclosure indicator, grounding citations, status badge),
+  real approve/send/discard/compliance-clear actions with real 409/403 enforcement.
+
+**Key decision — additive, not a replacement:** unlike the other two workflows, this screen's
+existing mock is a chat-thread UI that's also the live hand-off target for 3 OTHER still-mocked
+screens (Quote Comparison, Binder & Issuance, Endorsement Processing) via query params
+(`carrier`/`premium`/`insured` only). The real backend's 6 trigger types need far more structured
+data than those thin params carry (agent name, agency, submission id, limits, loss context), and
+2 of the 4 mock hand-off kinds (`policy-docs-delivered`, `endorsement-confirmed`) have no matching
+real trigger type at all — bridging that hand-off to the real API would mean fabricating fields.
+So the existing chat-thread mock and all 3 hand-offs are left completely untouched, and the real
+review-queue experience was added as a separate, clearly-labeled section on the same page instead
+of replacing the mock.
+
+**Verification:** `ruff`/`mypy` clean (78 files); `pytest` 27/27 across all three E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran all 6 triggers — Trigger 03 (No Market Found)
+correctly gated (`requires_compliance_review: true`, `carrier_name: null`,
+`carrier_names_disclosed: false`); full compliance-gate flow reproduced live (409 → junior 403 →
+senior 200 → approve 200); re-running Trigger 04 correctly deduplicated (FR-5, same item
+returned); re-running Trigger 05 correctly 409'd (FR-12, one follow-up max). SSR smoke test
+across all 18 frontend routes plus both Agent Copilot hand-off query-param variants returned 200
+with no errors — the chat-thread mock and its 3 cross-screen hand-offs confirmed unchanged.
+
+**Also restored:** `main.py`'s CORS middleware and `market_matching/router.py`'s
+`MarketMatchingPayload` typing had reverted to their pre-integration state on disk (main.py had
+no `CORSMiddleware` at all — confirmed live, an OPTIONS preflight from the FE origin returned 405
+instead of the expected 200 with CORS headers). Since these are required for the already-shipped
+Market Matching/Package Assembly FE integrations to reach the backend at all, both were
+re-applied — same edits as documented in this file's earlier addenda, re-verified live.
+
+## Phase 4 — Agent Communication Auto-Trigger (2026-07-24) ✅
+
+**Scope:** closes the gap where `agent_communication` was fully built but only reachable via a
+manually-POSTed trigger body. New file `verticals/es/agent_communication_hooks.py` (one new
+module, cross-workflow by necessity) + **one additive line each** in `market_matching/router.py`
+and `package_assembly/router.py`'s existing `run_*` handlers. `core/common`, `verticals/mga/**`,
+and `agent_communication`'s own pipeline/router/drafting logic are all untouched — the hook calls
+that logic (imports `AgentCommunicationPipeline` and reuses the router's own `_find_pending_duplicate`
+FR-5 helper directly) rather than reimplementing any of it.
+
+**What auto-fires now, and why not more:**
+- **`NO_MARKET_FOUND`** — from `market_matching`'s own `/run`, when `Decision.outcome is DECLINE`
+  (the precise true-zero-match signal; distinct from `REQUEST_INFO`, the missing-ACORD case, which
+  must NOT fire this).
+- **`SUBMISSION_ACKNOWLEDGMENT`** (status `READY`) / **`MISSING_INFO_REQUEST`** (status `BLOCKED`
+  or `READY_WITH_GAP`) — from `package_assembly`'s own `/run`, **one per carrier**, not combined
+  across a submission's multiple carriers. The PRD's own Trigger 01 sample combines carrier
+  statuses into one draft, but that needs tracking "how many carriers were selected" and waiting
+  for all of them to be packaged — real new infrastructure, not a mechanical extension of a thin
+  hook, and explicitly deferred (approved decision, not a silent simplification).
+- **`NO_RESPONSE_FOLLOWUP`** — explicitly **out of scope this pass**. FR-11 makes this
+  elapsed-time-vs-carrier-acceptance-window monitoring, which needs an Arq periodic job (materially
+  different infrastructure than a synchronous post-run hook), not a mechanical addition here.
+- **`QUOTE_TERMS_SUMMARY` / `PLACEMENT_CONFIRMATION`** — stay manual permanently per FR-2, until
+  Quote Comparison exists. Untouched; still reachable via the FE's existing `FIXTURE_TRIGGERS`.
+
+**Key finding from tracing the data (not assumed):** neither `MarketMatchingPayload` nor
+`PackageAssemblyPayload` carries `named_insured` — both pipelines resolve `acord.named_insured`
+internally (confirmed in `package_assembly/submission_resolver.py`) but never return it past their
+own `pipeline.run()`. Per the "only from data these workflows already produce, no new extraction"
+constraint, this was **not** fixed by adding new payload fields — accepted as a v1 gap. Auto-fired
+drafts get `drafting.py`'s already-existing graceful fallback (a generic `"Submission - ..."`
+subject line) instead of naming the insured; verified this degrades quality, not correctness —
+`build_facts()`/`_subject_line()` already treat every trigger field as optional.
+
+**No-throw guarantee:** every hook function wraps its own body in `try/except Exception:
+log.exception(...)` and returns `None` either way — a drafting failure is logged and swallowed,
+never raised into `market_matching`'s or `package_assembly`'s own response.
+
+**Verification:**
+- `ruff check .` / `mypy src` clean (79 files); `pytest` — all 3 E&S suites, **27/27 unmodified**;
+  `alembic check` clean, single head (no migration, none expected); no files under `core/common`
+  or `verticals/mga` touched.
+- Live: ran `market_matching` on `submission_06` (GreenLeaf, true zero-match) → a
+  `NO_MARKET_FOUND` draft appeared via `GET /api/es/agent-communication` with **no manual trigger
+  POST** (`requires_compliance_review: true`, `carrier_names_disclosed: false`, subject line
+  correctly falls back to `"Submission - Market Search Update"`). Ran `package_assembly` on
+  `scenario_01` (`READY_WITH_GAP`) → auto-fired `MISSING_INFO_REQUEST` scoped to the correct
+  carrier (Vantage Excess Partners). Ran `scenario_06` (`READY`) → auto-fired
+  `SUBMISSION_ACKNOWLEDGMENT`. Re-running a scenario whose submission already had an unresolved
+  draft correctly deduplicated (FR-5) — no second item created, confirming the reused dedup
+  helper works identically for auto-fired and manually-fired paths.
+- Confirmed `market_matching`'s and `package_assembly`'s own `/run` responses are byte-identical
+  in shape to before this change (same keys, same structure) — the hook is invisible to existing
+  callers except for the side effect of a new item appearing in `agent_communication`'s list.
+- Frontend: **zero code changes needed**, confirmed live rather than assumed — `GET
+  /api/es/agent-communication` is a generic per-tenant list, and the auto-fired items above
+  appeared in it exactly like manually-fired ones (same `ReviewItemOut`/`DraftCommunicationOut`
+  shape). `tsc`/`eslint`/`npm run build` re-confirmed clean (no FE files touched this phase). SSR
+  smoke test across all 18 frontend routes returned 200 with no errors.
+
+Not committed in either repo — ready for review.

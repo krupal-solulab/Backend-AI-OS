@@ -66,14 +66,25 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   submission's `ExtractedModel` via the same shared `ExtractionService` (a documented,
 >   deliberate exception to "no re-extraction" — see `submission_resolver.py` — because Market
 >   Matching doesn't persist `ExtractedField` rows anywhere queryable yet).
+> - **Retail Agent Communication** (`workflows/agent_communication/`) — the lightest build yet:
+>   no extraction, no rules-engine checks. Its input is already the structured output of Market
+>   Matching / Package Assembly (or a manually-logged trigger, FR-2); the real logic is
+>   deterministic RA-TN tone/framing selection + a compliance gate (native in `drafting.py`),
+>   with the LLM only turning already-decided facts + framing instructions into prose (never
+>   picking the framing itself). Two frozen-enum gaps (no "discarded" `ReviewStatus`, no
+>   "compliance sign-off" `ReviewAction`) are worked around with dedicated, workflow-owned
+>   router endpoints (`/discard`, `/compliance-clear`) that flip the workflow's own
+>   `payload.status`/`payload.requires_compliance_review` fields instead of extending the
+>   frozen enums — see `router.py`'s module docstring.
 >
-> MGA's `verticals/mga/` is untouched by either.
+> MGA's `verticals/mga/` is untouched by any of the three.
 
 ## 6. API namespacing (prevents collisions)
 ```
 /api/core/...                       shared (documents, audit, rules, review)
 /api/mga/{workflow}/...             e.g. /api/mga/submission-triage
-/api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly
+/api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
+                                     /api/es/agent-communication
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

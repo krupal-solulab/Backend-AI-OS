@@ -43,7 +43,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 9 | MGA · Portfolio |
 | 10 | E&S · Market Matching |
 | 11 | E&S · Package Assembly |
-| … | Further E&S workflows continue from 12 |
+| 12 | E&S · Retail Agent Communication |
+| … | Further E&S workflows continue from 13 |
 > Keep this table in sync as datasets are added.
 
 ### Workflow_10 (E&S Market Matching) layout note
@@ -71,6 +72,26 @@ E&S-owned, not shared fixtures code — same precedent as Workflow_10's
 submission (by matching `named_insured`) to re-derive field-level extracted
 data the scenario JSON doesn't inline — see that folder's
 `Validation_Rules_Test_Dataset.md` for why.
+
+### Workflow_12 (E&S Retail Agent Communication) layout note
+Same non-`submission_XX` precedent as Workflow_11: `src/fixtures/loader.py`
+doesn't apply here either (its glob matches `submission_*`, not `trigger_*`).
+Each `trigger_XX/` folder ships a `trigger_input.json` (a Market Matching /
+Package Assembly output object, or a manually-logged quote/bind entry — this
+workflow's actual input shape, per its PRD §1) plus `expected_draft.txt` and
+(for triggers 01/02/04/05/06 — not 03) a `tone_notes.txt`. Loaded by
+`verticals/es/workflows/agent_communication/trigger_loader.py`, which is
+E&S-owned, not shared fixtures code. Unlike Workflow_11, this workflow's live
+`POST /run` endpoint accepts a trigger object directly in the request body
+(the fixture loader is a test/eval-only convenience, not something the
+pipeline itself calls) — this matches the PRD's own framing that ALL six
+communication types are triggered by an already-materialized structured
+object, not something this workflow re-derives itself. `expected_draft.txt`
+is illustrative prose for a human reviewer, not a literal string the eval
+suite asserts against verbatim (LLM/mock-LLM phrasing varies) — the eval
+instead asserts structural/behavioral properties (correct trigger
+classification, correct carrier scoping, the compliance gate, grounded facts
+present in the draft).
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

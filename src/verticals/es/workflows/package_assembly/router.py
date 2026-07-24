@@ -22,6 +22,7 @@ from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
+from verticals.es.agent_communication_hooks import fire_package_assembly_result
 from verticals.es.workflows.package_assembly.scenario_loader import all_carrier_ids, load_scenario
 from verticals.es.workflows.package_assembly.schema import PackageAssemblyPayload
 from verticals.es.workflows.package_assembly.service import (
@@ -79,6 +80,7 @@ async def run_package_assembly(
         output = await pipeline.run(ctx, inp)
 
         item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+        await fire_package_assembly_result(session, ctx, output)  # additive, no-throw hook
         await audit.record(
             session, ctx,
             AuditEntry(

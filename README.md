@@ -213,3 +213,40 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_package_assembly.py -v
 ```
 
+## E&S Retail Agent Communication Copilot (Phase 3 — third E&S workflow)
+
+Drafts a retail-agent-facing email from the structured output of Market
+Matching or Package Assembly (or a manually-logged quote/bind entry) — six
+communication types, tone-calibrated per the RA-TN rules, with a compliance
+gate on the highest-sensitivity type (No Market Found). No extraction, no
+rules-engine checks — the lightest build in the vertical so far. Routes under
+`/api/es/agent-communication`; lives entirely in
+`verticals/es/workflows/agent_communication/` — see
+`docs/DATA_AND_FIXTURES.md`'s Workflow_12 note for its `trigger_*` fixture
+shape.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+$sr = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-senior"; "x-role"="senior" }
+# draft a communication from a trigger object (post the whole trigger_XX/
+# trigger_input.json's contents as the "trigger" field):
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body (Get-Content "path\to\trigger_04\trigger_input.json" -Raw | %{ "{`"trigger`":$_}" }) `
+  "http://localhost:4000/api/es/agent-communication/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/agent-communication"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/agent-communication/<id>"   # detail
+# No Market Found drafts are compliance-gated (senior/admin only to clear):
+Invoke-RestMethod -Method Post -Headers $sr "http://localhost:4000/api/es/agent-communication/<id>/compliance-clear"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_agent_communication.md](docs/FE_CONTRACT_agent_communication.md).
+
+### Run the eval (all 6 real Workflow_12 triggers, incl. FR-5/FR-12 dedup + the compliance-gate flow)
+```powershell
+pytest tests/test_es_agent_communication.py -v
+```
+
