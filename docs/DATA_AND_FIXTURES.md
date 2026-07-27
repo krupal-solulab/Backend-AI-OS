@@ -48,7 +48,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 14 | E&S · Binder & Policy Issuance Coordination |
 | 15 | E&S · Endorsement / Mid-Term Change Processing |
 | 16 | E&S · Renewal Remarketing |
-| … | Further E&S workflows continue from 17 |
+| 17 | E&S · Diligent Search & Compliance Documentation |
+| … | Further E&S workflows continue from 18 |
 > Row 2 ("MGA · Renewal Management") is an aspirational slot from the original roadmap —
 > that MGA workflow was never built (`verticals/mga/workflows/` is empty, no Workflow_2
 > fixture data exists on disk). Row 16 above is a SEPARATE, actually-built E&S workflow of a
@@ -171,6 +172,23 @@ RR-05's remarket execution genuinely re-invokes the real
 fixture for the same named insured — see `router.py`'s module docstring
 for the known limitation this implies (reflects original bind-time data,
 since this dataset ships no fresh renewal-time documents).
+
+### Workflow_17 (E&S Diligent Search & Compliance Documentation) layout note
+Only 4 scenarios (smaller than every prior dataset) and the simplest shape
+of any E&S workflow so far, tied with Workflow_16: every `scenario_XX/`
+folder is just one already-structured `case_context.json` (no raw emails,
+no new extraction target at all). `src/fixtures/loader.py` doesn't apply
+(glob mismatch). Loaded by
+`verticals/es/workflows/diligent_search/scenario_loader.py` (E&S-owned).
+Single-state scenarios (01-03) carry `state`/`state_requirement`/
+`declinations_on_file` at the top level; the multi-state scenario (04)
+instead carries `states` (a list) + `state_requirements` (a dict keyed by
+state code that may omit entries entirely — 5 of Scenario 04's 8 states
+have no entry, deliberately, to test FR-6's incompleteness handling).
+This workflow's `retention_period_years` output field is always `null` —
+no scenario's input data supplies real state-specific retention reference
+data, and FR-8 calls that "a required discovery input," not something to
+derive from general reasoning.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

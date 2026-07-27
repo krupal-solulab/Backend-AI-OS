@@ -403,3 +403,43 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_renewal_remarketing.py -v
 ```
 
+## E&S Diligent Search & Compliance Documentation Copilot (Phase 3 — eighth E&S workflow, highest legal stakes in the vertical)
+
+Given a submission's state(s) of operation, determines per-state
+diligent-search requirement, checks export-list/exemption eligibility,
+verifies declination evidence against a strict written-evidence bar, and
+generates a compliant document **only** when that bar is met — a wrongly
+generated affidavit is a potentially fraudulent record (PRD §8), so
+document generation is fully gated on evidence sufficiency, never
+partial/best-effort. A hedged, account-specific export-list note (e.g.
+"may be export-eligible... for large commercial accounts") never
+auto-resolves to an exemption — it's flagged `PENDING_DETERMINATION` for
+human/legal review (FR-7), distinct from an unconditional export-list
+exemption, which is EXEMPT and explicitly, distinctly logged (never
+indistinguishable from missing documentation). Multi-state risks render as
+a genuine per-state checklist, never a single collapsed verdict. Routes
+under `/api/es/diligent-search`; lives entirely in
+`verticals/es/workflows/diligent_search/` — see `docs/DATA_AND_FIXTURES.md`'s
+Workflow_17 note.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_03"}' "http://localhost:4000/api/es/diligent-search/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/diligent-search"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/diligent-search/<id>"   # detail
+# escalate an ambiguous PENDING_DETERMINATION state to compliance/legal:
+Invoke-RestMethod -Method Post -Headers $h "http://localhost:4000/api/es/diligent-search/<id>/escalate"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_diligent_search.md](docs/FE_CONTRACT_diligent_search.md).
+
+### Run the eval (all 4 real Workflow_17 scenarios — Scenario 03 is the mandatory, non-skippable release gate: zero document text generated when evidence is insufficient)
+```powershell
+pytest tests/test_es_diligent_search.py -v
+```
+

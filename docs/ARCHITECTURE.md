@@ -136,7 +136,26 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   step sequence) — with a stated limitation: it runs against the original Workflow_10 bind-time
 >   submission, since this dataset ships no fresh renewal-time documents.
 >
-> MGA's `verticals/mga/` is untouched by any of the seven.
+> - **Diligent Search & Compliance Documentation** (`workflows/diligent_search/`) — the highest
+>   legal-stakes workflow in the vertical (PRD §8): a wrongly generated affidavit is a potentially
+>   fraudulent record, not just a bad recommendation. DS-04's document-generation gate is enforced
+>   structurally — `compliance_engine.determine_state` only marks a state `document_eligible` on a
+>   confirmed SUFFICIENT determination, so `draft()` never has a partial/best-effort path to
+>   bypass. DS-02's central judgment call (FR-7): an unconditional export-list note (Texas, "IS on
+>   the export list... not required") auto-resolves to EXEMPT, but a hedged, account-specific note
+>   (Florida, "MAY be export-eligible... for large commercial accounts") routes to
+>   PENDING_DETERMINATION instead, detected via hedge-language matching rather than trusting
+>   `export_list_class: true` alone — never auto-resolved without human/legal review. DS-03
+>   distinguishes "evidence gathered and falls short" (INSUFFICIENT, a confirmed gap) from "state
+>   confirmed REQUIRED but no evidence submitted for assessment yet" (a NOT_APPLICABLE variant,
+>   genuinely different from an EXEMPT state's NOT_APPLICABLE) — collapsing these would either
+>   wrongly call an untouched state a confirmed failure or wrongly hide a real one.
+>   `retention_period_years` is always `null` — no scenario supplies real per-state legal
+>   reference data, and FR-8 calls that a required discovery input, not something to derive from
+>   reasoning. No new Agent Communication trigger, scheduled job, or cross-workflow re-invocation
+>   — re-scanned all 8 FRs; none applies here.
+>
+> MGA's `verticals/mga/` is untouched by any of the eight.
 
 ## 6. API namespacing (prevents collisions)
 ```
@@ -145,7 +164,7 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 /api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
                                      /api/es/agent-communication, /api/es/quote-comparison,
                                      /api/es/binder-issuance, /api/es/endorsement,
-                                     /api/es/renewal-remarketing
+                                     /api/es/renewal-remarketing, /api/es/diligent-search
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

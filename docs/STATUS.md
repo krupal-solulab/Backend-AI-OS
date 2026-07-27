@@ -1000,3 +1000,114 @@ $187,000 Ironclad incumbent). SSR smoke test across all 18 frontend routes retur
 no errors — the mock panel confirmed unchanged.
 
 Not committed in either repo — ready for review.
+
+## Phase 3 — E&S Diligent Search & Compliance Documentation Copilot ✅ (2026-07-27)
+
+**Scope:** eighth E&S workflow, `verticals/es/workflows/diligent_search/**` — the highest
+legal-stakes workflow in the vertical (PRD §8: a wrongly generated affidavit is a potentially
+fraudulent record, not just a bad recommendation). No migration; `core/common` and
+`verticals/mga/**` confirmed genuinely untouched via `git status` (zero new files, not just
+unmodified existing ones).
+
+**What was built**
+- `compliance_engine.py` — DS-01/DS-02 per-state requirement + export-list/exemption
+  determination (a genuine three-way split — `REQUIRED` / `EXEMPT` / `PENDING_DETERMINATION`,
+  never defaulted from an absent state entry), DS-03 (strict written-evidence-only sufficiency
+  counting, with a gap-detail phrasing verified to match the dataset's own worked numbers —
+  Scenario 03's "need 1 more decline, upgrade Carrier B's verbal one" counts against declinations
+  ON FILE, not written-only, since a verbal decline already occupies one of the required slots),
+  DS-04's generation gate (`document_eligible` set true ONLY on a confirmed SUFFICIENT
+  determination — enforced structurally here, not left to `draft()` to check). The core judgment
+  call: an unconditional export-list note (Texas, "IS on the export list... not required")
+  auto-resolves to EXEMPT; a hedged, account-specific note (Florida, "MAY be export-eligible...
+  for large commercial accounts") routes to PENDING_DETERMINATION instead (FR-7), detected via
+  hedge-language matching (`may`/`depends`/`for large`/etc.) rather than trusting
+  `export_list_class: true` alone.
+- `service.py` — `DiligentSearchPipeline`. Detects two input shapes from the data itself: a
+  single-state case (`state`/`state_requirement`/`declinations_on_file` at the top level) or a
+  multi-state case (`states` + a `state_requirements` dict that may omit entries entirely).
+  `draft()` generates one grounded document per DS-04-eligible state (never for any other state —
+  no partial/best-effort path exists to bypass) plus one overall per-state-checklist summary
+  draft.
+- `schema.py` — `ComplianceRecordPayload`, mirroring PRD §7 closely. One additive field beyond the
+  literal schema: `generated_document_text` per state (the literal schema only has
+  `document_generated: boolean`, which gives the FE nothing to actually show).
+  `retention_period_years` is always `null` — no scenario supplies real per-state legal reference
+  data, and FR-8 calls that a required discovery input, not something to derive from reasoning.
+- `router.py` — `/api/es/diligent-search`: `run`, list, detail, `approve`/`escalate` (both reuse
+  the existing frozen `ReviewAction` values — no new workflow-owned action endpoint was needed,
+  unlike several prior workflows, since `APPROVE`/`ESCALATE` already cover the PRD's full broker
+  action set).
+- `tests/test_es_diligent_search.py` — all 4 real Workflow_17 scenarios, plus `approve`/`escalate`.
+  Scenario 03 is the mandatory release-gate test: asserts `document_generated is False` AND
+  `generated_document_text is None` when evidence is insufficient.
+
+**Dataset:** `Workflow_17` (E&S · Diligent Search & Compliance Documentation — added to
+DATA_AND_FIXTURES.md's mapping table), copied from
+`Data sets/Workflow 8/diligent_search_dataset/` into `TEST_DATA_ROOT/Workflow_17/test_dataset/`
+unchanged. Only 4 scenarios (smaller than every prior dataset) and the simplest fixture shape of
+any E&S workflow so far, tied with Renewal Remarketing — every scenario is one already-structured
+`case_context.json`, no raw emails, no new extraction target at all.
+
+**Key decisions / deviations (pre-approved)**
+- Florida's hedged export-list note (Scenario 04) routes to `PENDING_DETERMINATION`, not `EXEMPT`
+  — per FR-7, account-specific export eligibility must be flagged for human/legal review, never
+  auto-resolved just because `export_list_class` is technically `true` in the data.
+- `generated_document_text` added as an additive schema field beyond PRD §7's literal shape, so
+  DS-04's "generate the compliant document" produces actual grounded content, not just a boolean.
+- `retention_period_years` left `null` everywhere rather than inventing plausible-sounding
+  per-state year counts — the honest answer per this project's grounding discipline, since FR-8
+  explicitly calls this a required discovery input.
+- No migration — `OutputPackage.payload` carries the full compliance record, same as every prior
+  E&S workflow.
+- No new Agent Communication trigger, no scheduled job, no cross-workflow re-invocation —
+  re-scanned all 8 FRs; none applies here (unlike Binder & Issuance/Endorsement's new triggers or
+  Renewal Remarketing's re-invocation).
+
+**Verification:** `ruff check .` / `mypy src` clean (117 files); `pytest tests/test_es_diligent_search.py`
+6/6 pass; full E&S suite (all eight workflows) green together (99 passed overall across the whole
+suite; the 11 pre-existing MGA/extraction failures are unrelated to this change — `Workflow_1`
+fixture data is absent from `TEST_DATA_ROOT` on this machine, a pre-existing condition unrelated
+to any E&S work this session). `alembic heads` still one head; no migration added, so no drift.
+`core/common`/`verticals/mga` byte-identical via `git status` (only `verticals/es/router.py`
+modified, one `include_router` line, plus new files under `workflows/diligent_search/`). Live: app
+boots, all eight vertical route groups + MGA's return 200. Live-verified all 4 scenarios end to
+end: Scenario 01 generates a real grounded document; Scenario 02 logs the exemption with an
+explicit `exemption_basis`, distinct from a blank/missing state; **Scenario 03 (the release gate)
+confirmed to generate `generated_document_text: null` and `document_generated: false`** — zero
+document text produced when evidence is insufficient; Scenario 04 renders a genuine 8-state
+checklist (TN/GA `REQUIRED`, FL `PENDING_DETERMINATION` per the FR-7 hedge-language call, the
+remaining 5 states explicitly flagged incomplete). Frontend: not touched this phase (no FE work
+requested for this workflow).
+
+### Addendum — Frontend Integration (2026-07-27)
+
+Wired `Insurance OS`'s `/app/workflows/diligent-search` screen to this workflow — same additive
+pattern as the prior FE integrations (no cross-screen hand-off to preserve here, same as Renewal
+Remarketing; kept for consistency with the rest of the app).
+
+**What changed**
+- FE: `src/lib/api/diligentSearch.ts` (typed run/list/detail/approve/escalate calls, reusing
+  `client.ts`), with `FIXTURE_SCENARIOS` (`{ref, label}` pairs, only 4 this time).
+- Added a new `LiveComplianceSection` to the existing (otherwise untouched)
+  `DiligentSearchCompliance` screen: run any of the 4 `Workflow_17` scenarios, real inbox, real
+  detail — full per-state checklist (never a single collapsed verdict), requirement/exemption/
+  sufficiency badges, exemption basis text, gap detail, per-declination written-vs-verbal
+  evidence display, the document-generated flag with real generated affidavit text when present,
+  the "not yet sourced" retention-period disclosure, and real approve/escalate actions (escalate
+  shown only when a state is genuinely `PENDING_DETERMINATION`).
+
+**Verification:** `ruff`/`mypy` clean (117 files); `pytest` 73/73 across all eight E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran all 4 scenarios — confirmed Scenario 01's
+real generated document text, Scenario 02's `EXEMPT` with explicit `exemption_basis` (never
+blank), **Scenario 03's release gate** (`document_generated: false`, `generated_document_text:
+null`), and Scenario 04's full 8-state checklist with Florida correctly landing on
+`PENDING_DETERMINATION` rather than auto-exempt; confirmed `escalate` on the Florida state
+succeeds. SSR smoke test across all 18 frontend routes returned 200 with no errors — the mock
+panel confirmed unchanged. (Both dev servers were found down partway through this session's
+verification — unrelated to this change — and were restarted cleanly before the final checks
+above.)
+
+Not committed in either repo — ready for review.
+
+Not committed — ready for review.

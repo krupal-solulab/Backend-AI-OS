@@ -8,6 +8,7 @@ from fastapi import APIRouter
 
 from verticals.es.workflows.agent_communication.router import router as agent_communication_router
 from verticals.es.workflows.binder_issuance.router import router as binder_issuance_router
+from verticals.es.workflows.diligent_search.router import router as diligent_search_router
 from verticals.es.workflows.endorsement.router import router as endorsement_router
 from verticals.es.workflows.market_matching.router import router as market_matching_router
 from verticals.es.workflows.package_assembly.router import router as package_assembly_router
@@ -25,3 +26,4 @@ router.include_router(quote_comparison_router)
 router.include_router(binder_issuance_router)
 router.include_router(endorsement_router)
 router.include_router(renewal_remarketing_router)
+router.include_router(diligent_search_router)
