@@ -782,4 +782,120 @@ $5,000 (the carrier's confirmed figure), not the originally requested $2,500. SS
 across all 18 frontend routes returned 200 with no errors — the mock panels and their hand-offs
 into Agent Copilot confirmed unchanged.
 
+## Phase 3 — E&S Endorsement / Mid-Term Change Processing Copilot ✅ (2026-07-27)
+
+**Scope:** sixth E&S workflow, `verticals/es/workflows/endorsement/**`. One deliberate,
+PRD-mandated addition outside that folder (per FR-16, same pattern as Binder & Issuance's
+FR-19): an 8th trigger type, `ENDORSEMENT_CONFIRMED`, added to `agent_communication/drafting.py`
++ one new function in `agent_communication_hooks.py`. No migration; `core/common` and
+`verticals/mga/**` confirmed untouched via `git status`.
+
+**What was built**
+- `endorsement_parser.py` — this workflow's two genuinely new parsing challenges: splitting a
+  multi-part change request's free-text detail ("Add BOTH Midstate Distribution Co. AND
+  Harborline Logistics...") into distinct items for EP-05's item-level reconciliation, and
+  parsing the carrier's issued-endorsement email (a third new carrier-email shape — "Added as
+  scheduled additional insured: X" lines, no premium/deductible focus). Everything else
+  (named_insured, carrier, the structured change type/detail) arrives pre-extracted in
+  `bound_policy_context.json` — no ACORD-style document extraction needed here.
+- `classification_engine.py` — EP-01 (type-based classification first — additional-insured/
+  address-correction types always routine, limit-increase/class-addition/location-addition types
+  never purely routine regardless of size — THEN a materiality-within-type check for everything
+  else, e.g. headcount changes: percentage AND absolute premium both must exceed threshold,
+  verified against Scenario 06's control case — a 75% headcount increase stays ROUTINE because
+  the account's $2,400 premium is too small in absolute terms), EP-02 (three-outcome appetite
+  recheck — reuses Market Matching's `CarrierProfile` DATA layer directly, NOT its `matching.py`
+  ranking logic; prefers `bound_policy_context.json`'s own embedded accepted/excluded class lists
+  when present, falls back to the real Workflow_10 carrier panel otherwise — verified this
+  actually differs per scenario by reading the real fixture files, not assumed), EP-05 (item-level
+  list reconciliation — genuinely different shape from Binder & Issuance's scalar-field equality
+  check), EP-06 (proration inputs computed uniformly from real dates — effective/expiration/
+  reference date — regardless of which convenience fields a given scenario happens to embed;
+  cross-checked against both scenarios' own stated day counts and matched exactly).
+- `service.py` — `EndorsementPipeline`. Branches on which of two input shapes a scenario
+  represents: pre-issuance (`bound_policy_context.json` + `endorsement_request_email.txt`) or
+  post-issuance reconciliation (`endorsement_request_sent.json` + `carrier_issued_endorsement.txt`).
+- `router.py` — `/api/es/endorsement`: `run`, list, detail, `resolve-discrepancy` (workflow-owned
+  — FR-19's resolution actions don't map onto the frozen `ReviewAction` enum), `send`/`escalate`
+  (reuse existing `ReviewAction.SEND`/`ESCALATE`, which already fit). `ENDORSEMENT_CONFIRMED`
+  fires automatically from this workflow's own `run`/`resolve-discrepancy` actions, same pattern
+  as Binder & Issuance.
+- `agent_communication_hooks.fire_endorsement_result` — extends the existing hook module with the
+  8th trigger type.
+- `tests/test_es_endorsement.py` — all 6 real Workflow_15 scenarios, plus the full
+  discrepancy → resolve → downstream-trigger-release flow end to end.
+
+**Dataset:** `Workflow_15` (E&S · Endorsement / Mid-Term Change Processing — added to
+DATA_AND_FIXTURES.md's mapping table), copied from
+`Data sets/Workflow 6/endorsement_dataset/` into `TEST_DATA_ROOT/Workflow_15/test_dataset/`
+unchanged.
+
+**Key decisions / deviations (pre-approved)**
+- "Request acknowledged" trigger: NOT built — re-scanned every FR (1-22); only FR-16 mandates
+  something new. Section 2.2's mention is a scope-boundary description, not a build requirement.
+- No migration — same reasoning as every prior E&S workflow.
+- EP-02's appetite data source: embedded fields preferred, real carrier-panel fallback used —
+  confirmed as a genuine per-scenario difference by reading the actual fixtures (Scenario 03
+  embeds accepted/excluded lists directly; Scenario 04 does not and requires the real Coastal
+  Mutual `CarrierProfile` lookup to confirm "apartment building management" covers the new
+  location's habitational use).
+
+**Bug found and fixed via the test's own literal-value assertion, not a live-only surprise:** the
+initial item-splitter blanket-stripped trailing periods from every split item, intended to trim a
+final sentence-ending period but instead truncating legitimate abbreviations too ("Midstate
+Distribution Co." → "Midstate Distribution Co"). Caught immediately by the test asserting the
+exact expected item list (not just reconciliation behavior, which would have passed either way
+since the substring-match reconciliation check tolerates the truncation) — fixed by removing the
+blanket strip entirely; only the surrounding regex's own stop-words are trimmed now.
+
+**Verification:** `ruff check .` / `mypy src` clean (103 files); `pytest tests/test_es_endorsement.py`
+9/9 pass; full E&S suite (market_matching + package_assembly + agent_communication +
+quote_comparison + binder_issuance + endorsement) 56/56 pass together. `alembic heads` still one
+head; `alembic check` no drift. `core/common`/`verticals/mga` byte-identical via `git status`.
+Live: app boots, all six vertical route groups + MGA's return 200. Live-verified Scenario 03's
+appetite-unknown surfaces correctly (never auto-approved/rejected). Live-verified Scenario 05's
+partial reconciliation (`requested_items` has 2 entries, `issued_items` has 1, `DISCREPANCY_FLAGGED`,
+trigger held) then `resolve-discrepancy` correctly releases it (agent-communication list: 15 → 15
+→ 16). Frontend: not touched this phase (no FE work requested for this workflow yet).
+
+### Addendum — Frontend Integration (2026-07-27)
+
+Wired `Insurance OS`'s `/app/workflows/endorsement-processing` screen to this workflow — same
+additive pattern as the three prior FE integrations, for the same reason.
+
+**What changed**
+- FE: `src/lib/api/endorsement.ts` (typed run/list/detail/resolve-discrepancy/send/escalate calls,
+  reusing `client.ts`), with `FIXTURE_SCENARIOS` (`{ref, label}` pairs).
+- Added a new `LiveEndorsementsSection` to the existing (otherwise untouched)
+  `EndorsementProcessing` screen: run any of the 6 `Workflow_15` scenarios, real inbox, real
+  detail — classification badge, the three-outcome appetite banner (within/outside/unknown,
+  visually distinct for `APPETITE_UNKNOWN`), state-licensing-clarification flag, premium/proration
+  inputs (never a confirmed figure), the drafted request text, item-level reconciliation
+  discrepancy with real resolve actions, and downstream-trigger-fired indicator.
+- **Third instance of the same naming collision**: `endorsement/schema.py` also defines its own
+  `DiscrepancyOut` class (now three workflows — quote_comparison, binder_issuance, endorsement —
+  each with their own same-named class the generator disambiguates once more than one is in the
+  spec at once). Fixed `binderIssuance.ts`'s now-broken plain reference the same way as before
+  (qualified by module path); wrote `endorsement.ts`'s reference pre-qualified from the start.
+
+**Key decision — additive, not a replacement (same reasoning as the three prior FE
+integrations):** the existing mock's `sendEndorsementConfirmed` is the real, working source of the
+4th and final Agent Copilot mock hand-off (`endorsement-confirmed`) and had to keep working
+unmodified. The real backend fires `ENDORSEMENT_CONFIRMED` automatically server-side on a
+verified-clean reconciliation — no broker button or navigation involved, same as Binder &
+Issuance's pattern. Both stay side by side. With this workflow, **all four of Agent Copilot's
+mock hand-off sources now have a real counterpart living alongside them** (Quote Comparison,
+Binder & Issuance ×2, Endorsement) — none of the mock hand-offs were touched in any of them.
+
+**Verification:** `ruff`/`mypy` clean (103 files); `pytest` 56/56 across all six E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran Scenario 03 — confirmed `APPETITE_UNKNOWN`
+with the exact detail text from the FE_CONTRACT sample; ran Scenario 05 — confirmed
+`requested_items` (2, including the correctly-un-truncated "Midstate Distribution Co.") vs.
+`issued_items` (1) producing `DISCREPANCY_FLAGGED`; resolved it and confirmed a real
+`ENDORSEMENT_CONFIRMED` draft appeared in Agent Communication with correct `named_insured`/
+`carrier_name`/subject line. SSR smoke test across all 18 frontend routes returned 200 with no
+errors — all four mock panels and their hand-offs into Agent Copilot confirmed unchanged.
+
+Not committed in either repo — ready for review.
+
 Not committed in either repo — ready for review.

@@ -265,3 +265,37 @@ async def fire_binder_issuance_result(
                 "submission %s — binder_issuance's own response is unaffected",
                 submission_id,
             )
+
+
+async def fire_endorsement_result(
+    session: AsyncSession, ctx: Ctx, *, submission_id: str | None, payload: dict[str, Any]
+) -> None:
+    """Fires the 8th trigger type, ENDORSEMENT_CONFIRMED, per Endorsement /
+    Mid-Term Change Processing's FR-16 — only once EP-05's issued-endorsement
+    reconciliation is verified clean or broker-resolved
+    (``payload["downstream_trigger_fired"]``, already computed by
+    endorsement's own service/router before this is ever called). Fires from
+    that workflow's own ``/run``/``resolve-discrepancy`` actions, same
+    pattern as Binder & Issuance — not a broker "select" step."""
+    if not payload.get("downstream_trigger_fired"):
+        return
+    try:
+        carrier_response = payload.get("carrier_response") or {}
+        requested_change = payload.get("requested_change") or {}
+        trigger = {
+            "trigger_type": "ENDORSEMENT_CONFIRMED",
+            "source_workflow": "Endorsement / Mid-Term Change Processing",
+            "submission_id": submission_id,
+            "named_insured": payload.get("named_insured"),
+            "carrier_name": payload.get("carrier_name"),
+            "endorsement_number": carrier_response.get("endorsement_number"),
+            "requested_change_detail": requested_change.get("detail"),
+            "issued_items": carrier_response.get("issued_items"),
+        }
+        await _draft_and_enqueue(session, ctx, submission_id, trigger)
+    except Exception:
+        log.exception(
+            "agent_communication auto-fire (ENDORSEMENT_CONFIRMED) failed for "
+            "submission %s — endorsement's own response is unaffected",
+            submission_id,
+        )

@@ -27,6 +27,15 @@ Auth: Phase-0 header stub — every request needs `x-tenant-id`, `x-user-id`,
 | POST | `/api/es/agent-communication/{item_id}/discard` | Marks the draft discarded (FR-15's third action) |
 | POST | `/api/es/agent-communication/{item_id}/compliance-clear` | **Senior/admin only.** Clears the compliance-review gate on a No Market Found draft |
 
+### An 8th trigger type: `ENDORSEMENT_CONFIRMED` (2026-07-27)
+
+Added per Endorsement / Mid-Term Change Processing's PRD FR-16 (same
+coordinated-extension pattern as Binder & Issuance's
+`POLICY_DOCUMENTS_DELIVERED` addition) — fires once that workflow's EP-05
+item-level issued-endorsement reconciliation is verified clean or
+broker-resolved. Same drafting/subject-line/facts pattern as every other
+trigger type; nothing about the endpoint contract above changed.
+
 ### A 7th trigger type: `POLICY_DOCUMENTS_DELIVERED` (2026-07-27)
 
 Added per Binder & Policy Issuance Coordination's PRD FR-19 (a coordinated
@@ -39,7 +48,7 @@ changed to accommodate it.
 ### Automatic vs. manual triggers (2026-07-24, updated 2026-07-27)
 
 `POST /run` above is still the only entry point, but as of `verticals/es/agent_communication_hooks.py`,
-six of the seven trigger types now fire it **automatically** (or semi-automatically) — no manual
+seven of the eight trigger types now fire it **automatically** (or semi-automatically) — no manual
 trigger-object construction needed for these:
 
 | Trigger type | Status | Fires from |
@@ -50,6 +59,7 @@ trigger-object construction needed for these:
 | `QUOTE_TERMS_SUMMARY` | **Fed by Quote Comparison, on broker selection** | `quote_comparison`'s `/{item_id}/select/{quote_id}` action — NOT its `/run` (the broker's selection is the trigger, per that PRD's FR-23 ordering). `MULTI_OPTION` cases never auto-fire until the broker picks one. `docs/FE_CONTRACT_quote_comparison.md` has the full detail. |
 | `PLACEMENT_CONFIRMATION` | **Fed by Binder & Issuance, on clean/resolved bind confirmation** | `binder_issuance`'s own `/run` (fires immediately on a clean BI-03 reconciliation) or its `/{item_id}/resolve-confirmation-discrepancy` action (fires once a flagged discrepancy is broker-resolved) — never on an unresolved discrepancy. `docs/FE_CONTRACT_binder_issuance.md` has the full detail. |
 | `POLICY_DOCUMENTS_DELIVERED` | **Fed by Binder & Issuance, on clean/resolved policy reconciliation** | Same workflow's `/run` or `/{item_id}/resolve-policy-discrepancy` action, gated on BI-05 instead of BI-03 |
+| `ENDORSEMENT_CONFIRMED` | **Fed by Endorsement Processing, on clean/resolved item-level reconciliation** | `endorsement`'s own `/run` or `/{item_id}/resolve-discrepancy` action, gated on EP-05's item-level check. `docs/FE_CONTRACT_endorsement.md` has the full detail. |
 | `NO_RESPONSE_FOLLOWUP` | **Manual only, permanently deferred** | Needs elapsed-time-vs-acceptance-window monitoring (FR-11) — an Arq periodic job, not built yet. Still fireable manually. |
 
 **What this means for the FE:** nothing — `GET /api/es/agent-communication` already lists every

@@ -46,7 +46,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 12 | E&S · Retail Agent Communication |
 | 13 | E&S · Quote Comparison & Recommendation |
 | 14 | E&S · Binder & Policy Issuance Coordination |
-| … | Further E&S workflows continue from 15 |
+| 15 | E&S · Endorsement / Mid-Term Change Processing |
+| … | Further E&S workflows continue from 16 |
 > Keep this table in sync as datasets are added.
 
 ### Workflow_10 (E&S Market Matching) layout note
@@ -128,6 +129,27 @@ parsed by that workflow's own native `bind_parser.py` — independent of
 Workflow_13's `quote_parser.py` (no cross-import), per the approved plan:
 the declarations-page format alone is different enough that a shared
 implementation wouldn't fully unify the two anyway.
+
+### Workflow_15 (E&S Endorsement / Mid-Term Change Processing) layout note
+Same mixed-stage precedent as Workflow_14 — pre-issuance scenarios ship
+`bound_policy_context.json` (already-structured, including the carrier's
+own accepted/excluded class lists WHEN embedded — not every scenario embeds
+them; scenario_04 requires falling back to the real Workflow_10
+`CarrierProfile` panel instead, verified by reading the actual fixture, not
+assumed) + `endorsement_request_email.txt`; the one post-issuance
+reconciliation scenario ships `endorsement_request_sent.json` +
+`carrier_issued_endorsement.txt` (a carrier email, yet another new shape —
+"Added as scheduled additional insured: X" lines). `src/fixtures/loader.py`
+doesn't apply. Loaded by
+`verticals/es/workflows/endorsement/scenario_loader.py` (E&S-owned) and
+parsed by that workflow's own native `endorsement_parser.py` — independent
+of `binder_issuance.bind_parser`'s internals (no cross-import). Unlike
+every prior E&S workflow, this one's structured "requested change"
+(type/detail) mostly arrives pre-extracted in the JSON snapshot — the real
+new parsing challenges here are splitting a multi-part request's free-text
+detail into individual items (EP-05's item-level reconciliation) and
+parsing the carrier's issued-endorsement email, not ACORD-style document
+extraction.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

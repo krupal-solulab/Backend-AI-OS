@@ -107,7 +107,21 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   select-is-the-trigger pattern) and adds a 7th Agent Communication trigger type,
 >   `POLICY_DOCUMENTS_DELIVERED` (per that PRD's FR-19, a coordinated extension).
 >
-> MGA's `verticals/mga/` is untouched by any of the five.
+> - **Endorsement / Mid-Term Change Processing** (`workflows/endorsement/`) — the first workflow
+>   to reuse substantial logic from TWO prior workflows simultaneously rather than extending just
+>   one: Market Matching's `CarrierProfile`/`load_carrier_panel` DATA layer (reused directly, since
+>   `decision_core` is E&S-vertical-shared infrastructure — a different boundary than the
+>   no-cross-import rule between sibling workflow folders) for EP-02's three-outcome appetite
+>   recheck, and Binder & Issuance's never-trust-the-carrier-document reconciliation discipline
+>   for EP-05 — though EP-05's reconciliation shape is genuinely different (item-level
+>   presence/absence checking across a LIST of requested vs. issued items, e.g. two additional
+>   insureds where the carrier only processes one, not scalar-field equality). EP-01's
+>   classification is type-based first, then materiality within type — never a single flat
+>   "how big is this change" score across every type. Extends `agent_communication_hooks.py` with
+>   an 8th trigger type, `ENDORSEMENT_CONFIRMED` (per that PRD's FR-16, a coordinated extension
+>   like Binder & Issuance's own `POLICY_DOCUMENTS_DELIVERED` addition).
+>
+> MGA's `verticals/mga/` is untouched by any of the six.
 
 ## 6. API namespacing (prevents collisions)
 ```
@@ -115,7 +129,7 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 /api/mga/{workflow}/...             e.g. /api/mga/submission-triage
 /api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
                                      /api/es/agent-communication, /api/es/quote-comparison,
-                                     /api/es/binder-issuance
+                                     /api/es/binder-issuance, /api/es/endorsement
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

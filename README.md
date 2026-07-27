@@ -325,3 +325,43 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_binder_issuance.py -v
 ```
 
+## E&S Endorsement / Mid-Term Change Processing Copilot (Phase 3 — sixth E&S workflow)
+
+Classifies mid-term change requests on already-bound policies by type and
+materiality (never a single flat "how big" score — certain types are
+always routine, certain types are never purely routine regardless of
+size), rechecks carrier appetite for changes touching class/state/severity
+exposure with an explicit three-outcome model (within/outside/genuinely
+unknown — an absent class is never assumed excluded, same discipline as
+Market Matching's MM-04), flags premium impact and proration inputs
+without asserting an unconfirmed figure, and reconciles the carrier's
+issued endorsement item-by-item for multi-part requests. Reuses Market
+Matching's Carrier Appetite Profile data and Binder & Policy Issuance's
+never-trust-the-carrier-document discipline. Routes under
+`/api/es/endorsement`; lives entirely in
+`verticals/es/workflows/endorsement/` — see `docs/DATA_AND_FIXTURES.md`'s
+Workflow_15 note for its mixed pre-issuance/reconciliation fixture shape.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_03"}' "http://localhost:4000/api/es/endorsement/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/endorsement"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/endorsement/<id>"   # detail
+# broker resolves a flagged item-level reconciliation discrepancy -> releases ENDORSEMENT_CONFIRMED:
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"resolution":"flag_carrier_error"}' `
+  "http://localhost:4000/api/es/endorsement/<id>/resolve-discrepancy"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_endorsement.md](docs/FE_CONTRACT_endorsement.md).
+
+### Run the eval (all 6 real Workflow_15 scenarios, incl. the appetite-unknown gate + item-level reconciliation handoff)
+```powershell
+pytest tests/test_es_endorsement.py -v
+```
+
