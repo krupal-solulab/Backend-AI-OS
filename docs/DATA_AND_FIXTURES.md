@@ -47,7 +47,12 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 13 | E&S · Quote Comparison & Recommendation |
 | 14 | E&S · Binder & Policy Issuance Coordination |
 | 15 | E&S · Endorsement / Mid-Term Change Processing |
-| … | Further E&S workflows continue from 16 |
+| 16 | E&S · Renewal Remarketing |
+| … | Further E&S workflows continue from 17 |
+> Row 2 ("MGA · Renewal Management") is an aspirational slot from the original roadmap —
+> that MGA workflow was never built (`verticals/mga/workflows/` is empty, no Workflow_2
+> fixture data exists on disk). Row 16 above is a SEPARATE, actually-built E&S workflow of a
+> similar name — don't conflate the two when reading this table.
 > Keep this table in sync as datasets are added.
 
 ### Workflow_10 (E&S Market Matching) layout note
@@ -150,6 +155,22 @@ new parsing challenges here are splitting a multi-part request's free-text
 detail into individual items (EP-05's item-level reconciliation) and
 parsing the carrier's issued-endorsement email, not ACORD-style document
 extraction.
+
+### Workflow_16 (E&S Renewal Remarketing) layout note
+The simplest shape of any E&S workflow so far — every `scenario_XX/` folder
+is just one already-structured `renewal_context.json` (no raw emails, no
+new extraction target at all). `src/fixtures/loader.py` doesn't apply
+(glob mismatch). Loaded by
+`verticals/es/workflows/renewal_remarketing/scenario_loader.py`
+(E&S-owned). This workflow's RR-01/RR-02 exposure/loss-change detection is
+NOT a port from an existing MGA Renewal Management implementation — that
+workflow was never built in this codebase (confirmed by inspection, not
+assumed); it's fresh native logic informed by the PRD's description only.
+RR-05's remarket execution genuinely re-invokes the real
+`MarketMatchingPipeline` against the original Workflow_10 submission
+fixture for the same named insured — see `router.py`'s module docstring
+for the known limitation this implies (reflects original bind-time data,
+since this dataset ships no fresh renewal-time documents).
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

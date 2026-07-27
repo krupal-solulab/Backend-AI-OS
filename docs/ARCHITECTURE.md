@@ -121,7 +121,22 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   an 8th trigger type, `ENDORSEMENT_CONFIRMED` (per that PRD's FR-16, a coordinated extension
 >   like Binder & Issuance's own `POLICY_DOCUMENTS_DELIVERED` addition).
 >
-> MGA's `verticals/mga/` is untouched by any of the six.
+> - **Renewal Remarketing** (`workflows/renewal_remarketing/`) — an ORCHESTRATION workflow, not
+>   a new capability: RR-05 genuinely re-invokes the existing `MarketMatchingPipeline` directly
+>   (a stronger, more explicit reuse mandate than anywhere else in this vertical — the literal
+>   pipeline object, not just its data), and RR-06 replicates Quote Comparison's QC-01
+>   discipline natively (a small 2-offer comparison, not that engine's full multi-quote logic).
+>   RR-01/RR-02's exposure/loss-change detection is deliberately NOT a port from MGA Renewal
+>   Management — that workflow was never built in this codebase (confirmed by inspection:
+>   `verticals/mga/workflows/` is empty, no Workflow_2 fixture data exists), so this is fresh
+>   native logic informed only by the PRD's description. RR-04's four-state trigger decision
+>   (`NO_REMARKET`/`LIGHT_REMARKET_CHECK`/`FULL_REMARKET`/`URGENT_REMARKET`) is the workflow's
+>   central judgment call and is never collapsed to binary. RR-05's re-invocation is a separate,
+>   broker-approval-gated router action, not automatic inside `/run` (matching the PRD's own
+>   step sequence) — with a stated limitation: it runs against the original Workflow_10 bind-time
+>   submission, since this dataset ships no fresh renewal-time documents.
+>
+> MGA's `verticals/mga/` is untouched by any of the seven.
 
 ## 6. API namespacing (prevents collisions)
 ```
@@ -129,7 +144,8 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 /api/mga/{workflow}/...             e.g. /api/mga/submission-triage
 /api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
                                      /api/es/agent-communication, /api/es/quote-comparison,
-                                     /api/es/binder-issuance, /api/es/endorsement
+                                     /api/es/binder-issuance, /api/es/endorsement,
+                                     /api/es/renewal-remarketing
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

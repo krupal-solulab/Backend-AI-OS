@@ -896,6 +896,107 @@ with the exact detail text from the FE_CONTRACT sample; ran Scenario 05 — conf
 `carrier_name`/subject line. SSR smoke test across all 18 frontend routes returned 200 with no
 errors — all four mock panels and their hand-offs into Agent Copilot confirmed unchanged.
 
-Not committed in either repo — ready for review.
+## Phase 3 — E&S Renewal Remarketing Copilot ✅ (2026-07-27)
+
+**Scope:** seventh E&S workflow, `verticals/es/workflows/renewal_remarketing/**` — the last
+workflow gated on real bound-policy data. No migration; `core/common` and `verticals/mga/**`
+confirmed genuinely untouched via `git status` (zero new files, not just unmodified existing
+ones).
+
+**What was built**
+- `remarket_engine.py` — RR-01/RR-02 (fresh native exposure/loss-history change detection — NOT
+  a port from MGA Renewal Management, confirmed by direct inspection that workflow was never
+  built: `verticals/mga/workflows/` is empty, no Workflow_2 fixture data exists anywhere on disk;
+  this is native logic informed only by the PRD's description), RR-03/RR-07 (incumbent
+  appetite-vs-actual-responsiveness — silence is itself a distinct signal, not merged into the
+  appetite check), RR-04 (the central four-state trigger decision — `NO_REMARKET` /
+  `LIGHT_REMARKET_CHECK` / `FULL_REMARKET` / `URGENT_REMARKET`, verified against all 6 scenarios
+  to never collapse to binary: Scenario 02's disproportionate-pricing FULL, Scenario 03's
+  explained-growth-plus-size-shift LIGHT, Scenario 04's silence-driven URGENT, and Scenarios
+  01/06's NO_REMARKET are all genuinely distinct code paths, confirmed live), RR-06 (native
+  2-offer comparability + exception-quote flagging — simple enough not to need Quote Comparison's
+  full multi-quote engine), RR-08 (remarketing-history weighting — parses the ACTUAL fixture
+  shape, a descriptive string, not the PRD schema's structured list; absence of history has no
+  suppressive effect, per FR-11).
+- `service.py` — `RenewalRemarketingPipeline`. Detects two input shapes from the data itself: a
+  trigger-decision pass or a post-remarket comparison pass (Scenario 05's shape, via presence of
+  `alternative_quote_received`).
+- `router.py` — `/api/es/renewal-remarketing`: `run`, list, detail, `initiate-remarket` (RR-05 —
+  genuinely re-invokes the real `MarketMatchingPipeline` against the original Workflow_10
+  bind-time submission for the same named insured, a separate broker-approval-gated action per
+  the PRD's own step sequence, NOT automatic inside `/run`; 409 on `NO_REMARKET`),
+  `accept-incumbent` (workflow-owned — records `final_decision`, which no frozen `ReviewAction`
+  carries), `escalate` (reuses the existing `ReviewAction.ESCALATE`, which already fits).
+- `tests/test_es_renewal_remarketing.py` — all 6 real Workflow_16 scenarios, plus the
+  `initiate-remarket`/`accept-incumbent`/`escalate` actions, including confirming the RR-05
+  re-invocation actually creates a real Market Matching review item (not just a flag).
+
+**Dataset:** `Workflow_16` (E&S · Renewal Remarketing — added to DATA_AND_FIXTURES.md's mapping
+table, with an explicit note distinguishing this from the MGA table's separate, never-built
+"Renewal Management" row at index 2), copied from
+`Data sets/Workflow 7/renewal_remarketing_dataset/` into `TEST_DATA_ROOT/Workflow_16/test_dataset/`
+unchanged. Simplest fixture shape of any E&S workflow so far — every scenario is one
+already-structured `renewal_context.json`, no raw emails, no new extraction target at all.
+
+**Key decisions / deviations (pre-approved)**
+- Scheduled monitoring (FR-19, "the fourth such process in this vertical"): continued the
+  deferred pattern — no new Arq infra built, consistent with the same call made 3 times already.
+- No migration — remarketing history treated as input data (read from the fixture, reasoned
+  over, logged to the audit trail) rather than a new accumulating table; real multi-year
+  cross-cycle persistence is a natural production evolution, not testable within this
+  fixture-driven pass.
+- No new Agent Communication trigger — re-scanned all 20 FRs; none mandates one (unlike Binder &
+  Issuance's FR-19 / Endorsement's FR-16, which explicitly did).
+- RR-05's execution model: a separate `initiate-remarket` action, not automatic — matches the
+  PRD's own §4 step 6b ("broker approves initiating a remarket, which re-invokes Market
+  Matching") more faithfully than firing it inside `/run`.
+
+**Verification:** `ruff check .` / `mypy src` clean (110 files); `pytest
+tests/test_es_renewal_remarketing.py` 11/11 pass; full E&S suite (all seven workflows) 67/67 pass
+together. `alembic heads` still one head; `alembic check` no drift. `core/common`/`verticals/mga`
+byte-identical via `git status`. Live: app boots, all seven vertical route groups + MGA's return
+200. Live-verified Scenarios 02/03/04 produce three genuinely distinct trigger levels (FULL/
+LIGHT/URGENT) with correctly differentiated reasoning text. Live-verified `initiate-remarket` on
+Scenario 02 genuinely re-invokes Market Matching — confirmed by checking
+`GET /api/es/market-matching`'s own list grew by one real item (8 → 9), not just a flag. Frontend:
+not touched this phase (no FE work requested for this workflow yet).
+
+### Addendum — Frontend Integration (2026-07-27)
+
+Wired `Insurance OS`'s `/app/workflows/renewal-remarketing` screen to this workflow — same
+additive pattern as the prior FE integrations, though for a different reason this time.
+
+**What changed**
+- FE: `src/lib/api/renewalRemarketing.ts` (typed run/list/detail/initiate-remarket/
+  accept-incumbent/escalate calls, reusing `client.ts`), with `FIXTURE_SCENARIOS`
+  (`{ref, label}` pairs).
+- Added a new `LiveRenewalsSection` to the existing (otherwise untouched) `RenewalRemarketing`
+  screen: run any of the 6 `Workflow_16` scenarios, real inbox, real detail — the four-state
+  trigger badge with its reasoning summary, exposure/loss-history/incumbent-response signals,
+  remarketing-history grounding text, the post-remarket comparison view (incumbent vs.
+  alternative, exception-quote flag rendered with equal prominence per the FE_CONTRACT's
+  explicit "never default to the lower premium" instruction), and real
+  initiate/accept/escalate actions.
+
+**Key decision — additive again, but for a new reason:** unlike the last four workflows, this
+mock's actions (`reinvokeMarketMatching`/`initiateUrgentRemarket`) are pure local log entries —
+no cross-screen hand-off to preserve here. The additive pattern was kept anyway, for consistency
+with the rest of the app and because the real data model still doesn't map cleanly onto the
+mock's (single 3-tier per-quote materiality vs. the real schema's directly-comparable/
+material-differences model; a `remarketedTimesInHistory` counter vs. the real free-text
+`remarketing_history_detail`). Same reasoning as Market Matching/Package Assembly's original
+"wire what's real, stub the rest" call — just expressed as a separate section instead of a
+tab-level stub, per the pattern this app has settled into.
+
+**Verification:** `ruff`/`mypy` clean (110 files); `pytest` 67/67 across all seven E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran Scenarios 02/03/04 — confirmed
+`FULL_REMARKET`/`LIGHT_REMARKET_CHECK`/`URGENT_REMARKET` with reasoning text matching the
+FE_CONTRACT samples exactly; called `initiate-remarket` on Scenario 02 and confirmed
+`/api/es/market-matching`'s list grew by one real item (9 → 10, continuing from this phase's
+own backend verification); confirmed a `409` when calling `initiate-remarket` on a
+`NO_REMARKET` decision (Scenario 01); ran Scenario 05 and confirmed the exception-quote
+comparison ($171,000 Palmetto alternative flagged `is_exception_based: true` alongside the
+$187,000 Ironclad incumbent). SSR smoke test across all 18 frontend routes returned 200 with
+no errors — the mock panel confirmed unchanged.
 
 Not committed in either repo — ready for review.

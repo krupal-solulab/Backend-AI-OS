@@ -365,3 +365,41 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_endorsement.py -v
 ```
 
+## E&S Renewal Remarketing Copilot (Phase 3 — seventh E&S workflow, last one gated on bound-policy data)
+
+Given a bound policy approaching renewal, detects exposure and loss-history
+changes, checks incumbent responsiveness and appetite, and produces a
+**graduated, four-state** remarket recommendation
+(`NO_REMARKET`/`LIGHT_REMARKET_CHECK`/`FULL_REMARKET`/`URGENT_REMARKET`) —
+never a binary yes/no (Scenario 03's whole point: favorable change + a
+size-band shift earns a lightweight check, not a full shop). An
+orchestration workflow — genuinely re-invokes the existing Market Matching
+engine rather than a separate ranking implementation, and reuses Quote
+Comparison's term-normalization discipline for post-remarket comparisons.
+Routes under `/api/es/renewal-remarketing`; lives entirely in
+`verticals/es/workflows/renewal_remarketing/` — see
+`docs/DATA_AND_FIXTURES.md`'s Workflow_16 note (and its explicit
+clarification that the MGA "Renewal Management" mapping-table row is a
+separate, never-built slot — don't confuse the two).
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_02"}' "http://localhost:4000/api/es/renewal-remarketing/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/renewal-remarketing"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/renewal-remarketing/<id>"   # detail
+# broker approves a light/full remarket -> genuinely re-invokes Market Matching:
+Invoke-RestMethod -Method Post -Headers $h "http://localhost:4000/api/es/renewal-remarketing/<id>/initiate-remarket"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_renewal_remarketing.md](docs/FE_CONTRACT_renewal_remarketing.md).
+
+### Run the eval (all 6 real Workflow_16 scenarios, incl. the four-state distinction + genuine Market Matching re-invocation)
+```powershell
+pytest tests/test_es_renewal_remarketing.py -v
+```
+

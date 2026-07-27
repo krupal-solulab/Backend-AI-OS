@@ -12,6 +12,9 @@ from verticals.es.workflows.endorsement.router import router as endorsement_rout
 from verticals.es.workflows.market_matching.router import router as market_matching_router
 from verticals.es.workflows.package_assembly.router import router as package_assembly_router
 from verticals.es.workflows.quote_comparison.router import router as quote_comparison_router
+from verticals.es.workflows.renewal_remarketing.router import (
+    router as renewal_remarketing_router,
+)
 
 router = APIRouter(prefix="/api/es", tags=["es"])
 
@@ -21,3 +24,4 @@ router.include_router(agent_communication_router)
 router.include_router(quote_comparison_router)
 router.include_router(binder_issuance_router)
 router.include_router(endorsement_router)
+router.include_router(renewal_remarketing_router)
