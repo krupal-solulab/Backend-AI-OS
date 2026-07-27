@@ -1,6 +1,26 @@
 """Cross-workflow hook: fires Agent Communication drafts automatically from
-Market Matching's and Package Assembly's own successful ``/run`` calls, per
+Market Matching's, Package Assembly's, Quote Comparison's, and Binder &
+Policy Issuance's own successful calls, per
 ``Data sets/Workflow 3/PRD_Retail_Agent_Communication_Copilot.md`` §4/§5.2.
+
+Binder & Issuance's ``fire_binder_issuance_result`` introduces the 7th
+trigger type, ``POLICY_DOCUMENTS_DELIVERED`` (per that workflow's PRD
+FR-19 — a coordinated extension to this PRD, not something Binder &
+Issuance's own PRD could specify unilaterally). Both
+``PLACEMENT_CONFIRMATION`` and ``POLICY_DOCUMENTS_DELIVERED`` fire
+automatically off Binder & Issuance's own run/resolve calls (same pattern
+as Market Matching/Package Assembly, NOT Quote Comparison's
+select-is-the-trigger pattern) — BI-06's gate is "only on a verified-clean
+reconciliation," already computed by that workflow's own
+``downstream_triggers_fired`` flags before this hook is ever called.
+
+Quote Comparison's ``fire_quote_comparison_result`` is the one exception to
+"fires right after the upstream workflow's own /run": per that workflow's
+PRD (FR-20/FR-23 — "broker marks which quote(s) to present... which feeds
+FR-20's downstream trigger"), the broker's own selection is the trigger, not
+Quote Comparison's recommendation output by itself. So this one is called
+from quote_comparison's ``/{item_id}/select/{quote_id}`` action, not its
+``/run`` — see that router's docstring.
 
 This deliberately reaches across workflow boundaries — WORKFLOW_TEMPLATE.md's
 usual per-workflow-folder ownership rule bends here because this IS the
@@ -149,3 +169,99 @@ async def fire_package_assembly_result(
             "package_assembly's own response is unaffected",
             output.submission_id,
         )
+
+
+async def fire_quote_comparison_result(
+    session: AsyncSession,
+    ctx: Ctx,
+    *,
+    submission_id: str | None,
+    named_insured: str | None,
+    selected_quote: dict[str, Any],
+) -> None:
+    """Broker-selected quote -> QUOTE_TERMS_SUMMARY (PRD §5.2 row 4),
+    replacing that trigger's v1 manual-input fallback (Quote Comparison
+    PRD's FR-20). Called from quote_comparison's own ``/select`` action, not
+    its ``/run`` — see module docstring. A declination can't be selected as
+    a "quote" to summarize; that path is a no-op, not an error."""
+    try:
+        if selected_quote.get("response_type") != "QUOTE":
+            return
+        material_context = "; ".join(
+            s["description"]
+            for s in (selected_quote.get("subjectivities") or [])
+            if s.get("materiality") == "material"
+        )
+        trigger = {
+            "trigger_type": "QUOTE_TERMS_SUMMARY",
+            "source_workflow": "Quote Comparison",
+            "submission_id": submission_id,
+            "named_insured": named_insured,
+            "carrier_name": selected_quote.get("carrier_name"),
+            "quoted_terms": {
+                "premium": selected_quote.get("premium"),
+                "limits": selected_quote.get("limits"),
+            },
+            "quote_context": material_context or None,
+        }
+        await _draft_and_enqueue(session, ctx, submission_id, trigger)
+    except Exception:
+        log.exception(
+            "agent_communication auto-fire (QUOTE_TERMS_SUMMARY) failed for submission %s — "
+            "quote_comparison's own response is unaffected",
+            submission_id,
+        )
+
+
+async def fire_binder_issuance_result(
+    session: AsyncSession, ctx: Ctx, *, submission_id: str | None, payload: dict[str, Any]
+) -> None:
+    """Fires PLACEMENT_CONFIRMATION and/or POLICY_DOCUMENTS_DELIVERED per
+    BI-06's gate — ``payload["downstream_triggers_fired"]`` is already
+    computed by binder_issuance's own service (true only on a verified-clean
+    reconciliation, per FR-18/FR-19); this function just builds and enqueues
+    whichever triggers are eligible, grounded in the VERIFIED/RECONCILED
+    terms (FR-20), never the originally requested ones."""
+    triggers_fired = payload.get("downstream_triggers_fired") or {}
+    named_insured = payload.get("named_insured")
+    carrier_name = payload.get("carrier_name")
+
+    if triggers_fired.get("placement_confirmation"):
+        try:
+            confirmed = (payload.get("carrier_confirmation") or {}).get("confirmed_terms") or {}
+            trigger = {
+                "trigger_type": "PLACEMENT_CONFIRMATION",
+                "source_workflow": "Binder & Policy Issuance Coordination",
+                "submission_id": submission_id,
+                "named_insured": named_insured,
+                "carrier_name": carrier_name,
+                "bound_terms": confirmed,
+            }
+            await _draft_and_enqueue(session, ctx, submission_id, trigger)
+        except Exception:
+            log.exception(
+                "agent_communication auto-fire (PLACEMENT_CONFIRMATION) failed for "
+                "submission %s — binder_issuance's own response is unaffected",
+                submission_id,
+            )
+
+    if triggers_fired.get("policy_documents_delivered"):
+        try:
+            trigger = {
+                "trigger_type": "POLICY_DOCUMENTS_DELIVERED",
+                "source_workflow": "Binder & Policy Issuance Coordination",
+                "submission_id": submission_id,
+                "named_insured": named_insured,
+                "carrier_name": carrier_name,
+                "binder_number": (payload.get("carrier_confirmation") or {}).get("binder_number"),
+                "verified_terms": (
+                    payload.get("carrier_confirmation") or {}
+                ).get("confirmed_terms"),
+            }
+            await _draft_and_enqueue(session, ctx, submission_id, trigger)
+        except Exception:
+            log.exception(
+                "agent_communication auto-fire (POLICY_DOCUMENTS_DELIVERED) failed for "
+                "submission %s — binder_issuance's own response is unaffected",
+                submission_id,
+            )

@@ -76,15 +76,46 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   router endpoints (`/discard`, `/compliance-clear`) that flip the workflow's own
 >   `payload.status`/`payload.requires_compliance_review` fields instead of extending the
 >   frozen enums — see `router.py`'s module docstring.
+> - **Quote Comparison** (`workflows/quote_comparison/`) — the biggest build in the vertical so
+>   far: a genuinely NEW extraction target (unstructured carrier-response emails, not ACORD/
+>   loss-run) parsed by a native `quote_parser.py` — deliberately NOT the shared
+>   `ExtractionService`, since that parses `Label: value` strictly per line, which breaks on this
+>   dataset's own most important field (subjectivity clauses wrapping across lines). QC-01
+>   (comparability), QC-02 (subjectivity materiality), QC-06 (mode selection), QC-07 (validity
+>   urgency) are entirely native comparison reasoning — offers compared against each other, not a
+>   submission against a fixed appetite standard, so none of it fits the generic 6-check engine
+>   either. QC-07's validity monitoring is recomputed at READ TIME on every `GET` (no new
+>   scheduled-job infra, same deferred-scheduler call made for Agent Communication's
+>   `NO_RESPONSE_FOLLOWUP`). Feeds Agent Communication's `QUOTE_TERMS_SUMMARY` — but only when the
+>   broker explicitly selects a quote (`/select/{quote_id}`), never automatically from its own
+>   `/run`, since the PRD requires the broker's decision to be the trigger (extends
+>   `verticals/es/agent_communication_hooks.py`, the same cross-workflow hook Market Matching/
+>   Package Assembly already use, one function added, no changes to how the others fire).
 >
-> MGA's `verticals/mga/` is untouched by any of the three.
+> - **Binder & Policy Issuance Coordination** (`workflows/binder_issuance/`) — closes the full
+>   placement lifecycle. Introduces a THIRD extraction target this vertical (carrier bind
+>   confirmation emails, issued-policy declarations pages) parsed by a native `bind_parser.py` —
+>   independent of Quote Comparison's `quote_parser.py` (no cross-import; the declarations-page
+>   format alone is different enough that a shared implementation wouldn't fully unify them).
+>   BI-03/BI-05 (never trust a carrier's own confirmation/issued policy without field-by-field
+>   reconciliation) and BI-06 (downstream triggers fire only on a verified-clean state) are the
+>   core native logic. BI-04/BI-07's ongoing monitoring reuses the same deferred "recompute at
+>   read time" pattern as Quote Comparison's QC-07 (no new scheduler built — this is now the
+>   third instance of this deferral, tracked honestly rather than silently repeated). Extends
+>   `agent_communication_hooks.py` with a second auto-fire pattern (fires from THIS workflow's
+>   own `/run`/resolve actions, like Market Matching/Package Assembly — not Quote Comparison's
+>   select-is-the-trigger pattern) and adds a 7th Agent Communication trigger type,
+>   `POLICY_DOCUMENTS_DELIVERED` (per that PRD's FR-19, a coordinated extension).
+>
+> MGA's `verticals/mga/` is untouched by any of the five.
 
 ## 6. API namespacing (prevents collisions)
 ```
 /api/core/...                       shared (documents, audit, rules, review)
 /api/mga/{workflow}/...             e.g. /api/mga/submission-triage
 /api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
-                                     /api/es/agent-communication
+                                     /api/es/agent-communication, /api/es/quote-comparison,
+                                     /api/es/binder-issuance
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

@@ -532,4 +532,254 @@ never raised into `market_matching`'s or `package_assembly`'s own response.
   shape). `tsc`/`eslint`/`npm run build` re-confirmed clean (no FE files touched this phase). SSR
   smoke test across all 18 frontend routes returned 200 with no errors.
 
+## Phase 3 — E&S Quote Comparison & Recommendation Copilot ✅ (2026-07-27)
+
+**Scope:** fourth E&S workflow, `verticals/es/workflows/quote_comparison/**` — the biggest build
+in the vertical so far per the PRD's own warning (genuinely new extraction target + comparison
+logic, not a reuse of any prior workflow's pattern). One deliberate, narrow addition outside that
+folder: a new function in the existing `verticals/es/agent_communication_hooks.py` (FR-20's
+downstream handoff). No migration; `core/common` and `verticals/mga/**` confirmed untouched via
+`git status`.
+
+**What was built**
+- `quote_parser.py` — native carrier-response-email parser. Deliberately NOT
+  `core.extraction.DefaultExtractionService`: that service parses `Label: value` strictly per
+  line, which would silently truncate this dataset's own most important field — subjectivity
+  clauses that wrap across lines (verified against the real fixture text, not assumed).
+  Declinations (pure prose, no Key:Value structure) and multi-value lines ("Deductible: $25,000
+  (all perils), Wind/Hail: $100,000") also don't fit the shared extractor. Classifies
+  QUOTE vs DECLINATION (presence of a `Premium:` line), splits/classifies subjectivities as
+  routine vs. material (deadline/dependency/outstanding-underwriting-info keyword heuristics,
+  validated against all 6 scenarios' expected outcomes), classifies endorsement basis, and
+  extracts declination reasons + the dollar figure driving them.
+- `comparison_engine.py` — QC-01 (comparability: limits + both deductible types + every
+  endorsement's basis must match exactly, never premium alone), QC-03 (declination consistency,
+  lightweight per the approved plan — reuses Market Matching's existing
+  `load_carrier_panel(10)`/`severity_ceiling` data, no new infrastructure), QC-06 (mode
+  selection: `SINGLE_RECOMMENDATION` / `MULTI_OPTION` / `SINGLE_QUOTE_URGENT` /
+  `SINGLE_QUOTE_ROUTINE`), QC-07 (validity/urgency — a material subjectivity's own dependency can
+  drive urgency independent of the validity window, per FR-16). Also
+  `recompute_urgency_from_payload` — a pure, read-time-only projection (no DB write) recomputing
+  urgency against today's date on every `GET`, deferring real scheduled-job infrastructure (same
+  call made for Agent Communication's `NO_RESPONSE_FOLLOWUP`).
+- `service.py` — `QuoteComparisonPipeline`. Unlike Package Assembly/Agent Communication, this
+  workflow DOES ingest raw documents and DOES run real extraction (just a native one). Resolves
+  an explicit `as_of` reference date from `WorkflowInput.params` (fixture/test determinism) or
+  defaults to the real current date in production.
+- `router.py` — `/api/es/quote-comparison`: `run`, list, detail (read-time recompute),
+  `select/{quote_id}` (fires the Agent Communication handoff — see below),
+  `request-revised-terms`/`mark-lapsed` (FR-23's other two logged-only broker decisions).
+- `agent_communication_hooks.fire_quote_comparison_result` — extends the existing hook module
+  with one new function. Deliberately fires from quote_comparison's `/select/{quote_id}`, NOT
+  its `/run` — per the PRD's own FR-23 ordering ("broker marks which quote(s) to present...
+  which feeds FR-20's downstream trigger"), the broker's selection is the trigger, not the
+  system's recommendation by itself. `MULTI_OPTION` cases never auto-fire until the broker picks
+  one — confirmed live (see Verification).
+- `tests/test_es_quote_comparison.py` — all 6 real Workflow_13 scenarios (comparability,
+  materiality, urgency, declination consistency), the read-time recompute function directly, and
+  the full FR-20 handoff + MULTI_OPTION-doesn't-autofire behavior end to end.
+
+**Dataset:** `Workflow_13` (E&S · Quote Comparison — added to DATA_AND_FIXTURES.md's mapping
+table), copied from `Data sets/Workflow 4/quote_comparison_dataset/` into
+`TEST_DATA_ROOT/Workflow_13/test_dataset/` unchanged.
+
+**Key decisions / deviations (pre-approved)**
+- `MULTI_OPTION` never auto-fires Agent Communication — only `SINGLE_RECOMMENDATION`/
+  `SINGLE_QUOTE_*` cases have one clear quote to hand off, and even those wait for the broker's
+  explicit `/select` action, not `/run`.
+- QC-07's validity threshold: 5 business days (the PRD's own explicit placeholder default),
+  approximated as calendar days for v1 (thresholds are placeholders pending real broker
+  validation per every rules document in this project).
+- QC-03: lightweight version built (declination_reason + consistent/inconsistent/
+  unable_to_determine against existing carrier severity-ceiling data) — not skipped, since it
+  reuses data that already exists and costs little.
+- No migration — same reasoning as Package Assembly/Agent Communication.
+- `carrier_id` is always `null` in v1 (carrier identity resolved by name only, via email-domain
+  mapping) — flagged in the FE contract, not silently left unexplained.
+
+**Bug found and fixed via live testing, not just unit tests:** the initial deductible parser
+split on the first comma to separate "all perils" from "wind/hail" values — but
+`"$25,000 (all perils), Wind/Hail: $100,000"` has a THOUSANDS-SEPARATOR comma inside the first
+dollar figure itself, which corrupted the split (`"$25"` / `"000 (all perils), Wind/Hail:
+$100,000"`). All 10 pytest tests passed anyway, because none of them asserted the actual
+deductible VALUES — only comparability/mode outcomes, which happened to still be correct despite
+the corrupted values. Caught immediately during live `curl` verification (the whole reason this
+project's process requires live checks, not just green tests), fixed with a targeted
+label-anchored regex instead of positional comma-splitting, and a new test assertion added
+locking in the correct parsed values for both carriers in Scenario 02 so this bug class can't
+silently regress again.
+
+**Verification:** `ruff check .` / `mypy src` clean (87 files); `pytest
+tests/test_es_quote_comparison.py` 10/10 pass; full E&S suite (market_matching + package_assembly
++ agent_communication + quote_comparison) 37/37 pass together. `alembic heads` still one head;
+`alembic check` no drift. `core/common`/`verticals/mga` byte-identical via `git status`. Live: app
+boots, all four vertical route groups + MGA's return 200. Live-verified Scenario 02's deductible
+values after the fix (`$25,000`/`$100,000` and `$10,000`/`$50,000`, matching the source emails
+exactly). Live-exercised the full FR-20 handoff: `select`-ing a quote created a new pending item
+in `agent-communication`'s list (12 → 13); confirmed `MULTI_OPTION`'s `/run` alone does NOT
+create one. Live-exercised `mark-lapsed` (`payload.status` → `"LAPSED"`). Frontend: not touched
+this phase (no FE work requested for this workflow yet).
+
+### Addendum — Frontend Integration (2026-07-27)
+
+Wired `Insurance OS`'s `/app/workflows/quote-comparison` screen to this workflow — same additive
+pattern as Agent Communication's FE integration (not a full replace), for an analogous reason.
+
+**What changed**
+- FE: `src/lib/api/quoteComparison.ts` (typed run/list/detail/select/request-revised-terms/
+  mark-lapsed calls, reusing `client.ts`), with `FIXTURE_SCENARIOS` — just `{ref, label}` pairs
+  this time, not embedded JSON (unlike Agent Communication's triggers, `POST /run` here only
+  needs `scenario_ref`, same shorthand pattern as Market Matching/Package Assembly).
+- Added a new `LiveComparisonsSection` to the existing (otherwise untouched) `QuoteComparison`
+  screen: run any of the 6 `Workflow_13` scenarios, real inbox, real detail — mode badge
+  (`SINGLE_RECOMMENDATION`/`MULTI_OPTION`/`SINGLE_QUOTE_URGENT`/`SINGLE_QUOTE_ROUTINE`),
+  comparability banner, per-quote subjectivities split by real `materiality` (`routine`/
+  `material` — the mock's 3-tier Standard/Material/Deal-breaker per-quote model doesn't match
+  the real per-subjectivity 2-tier one, so the live section uses the real values directly rather
+  than remapping them), urgency flags, declination display, and real actions.
+
+**Key decision — additive, not a replacement (same reasoning as Agent Communication):** the
+existing mock's "Present to retail agent" button is a real, working hand-off into Agent
+Copilot's mock chat-thread UI (`trigger=quote-summary`) that must keep working unmodified. The
+real backend's hand-off is architecturally different in a way that makes replacing the mock
+button pointless anyway: selecting a quote in the live section fires the real Agent
+Communication draft **directly, server-side** (`POST .../select/{quote_id}`) — there's no
+navigation involved at all, unlike the mock's client-side route change. So both stay side by
+side: the mock table/recommendation/hand-off exactly as before, plus a separate real section
+below it whose own "Present this quote" action does the actual FR-20 handoff in one call.
+
+**Verification:** `ruff`/`mypy` clean (87 files); `pytest` 37/37 across all four E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran Scenario 02 — confirmed `MULTI_OPTION`,
+`directly_comparable: false`, Harbor $74,000 / Coastal $81,500 matching the FE_CONTRACT sample
+exactly; selected Harbor's quote and confirmed a real `QUOTE_TERMS_SUMMARY` draft appeared in
+Agent Communication's list with correct `named_insured`/`carrier_name`/subject line/grounding
+citations, not deduplicated. SSR smoke test across all 18 frontend routes returned 200 with no
+errors — the mock table and its hand-off into Agent Copilot confirmed unchanged.
+
+## Phase 3 — E&S Binder & Policy Issuance Coordination Copilot ✅ (2026-07-27)
+
+**Scope:** fifth E&S workflow, `verticals/es/workflows/binder_issuance/**` — closes the full
+placement lifecycle (submission → match → package → quote → compare → bind and issue). Two
+deliberate, PRD-mandated additions outside that folder (both explicitly called for by FR-19, not
+scope creep): one new function in `agent_communication_hooks.py`, and a 7th trigger type
+(`POLICY_DOCUMENTS_DELIVERED`) added to `agent_communication/drafting.py`. No migration;
+`core/common` and `verticals/mga/**` confirmed untouched via `git status`.
+
+**What was built**
+- `bind_parser.py` — native parser for the workflow's TWO new extraction targets: carrier bind
+  confirmation emails and issued-policy declarations pages (the latter has no email headers at
+  all — a third, structurally distinct format). Independent of Quote Comparison's own
+  `quote_parser.py` (no cross-import), per the approved plan — the declarations-page format
+  alone is different enough that a shared implementation wouldn't fully unify the two anyway.
+- `coordination_engine.py` — BI-01 (bind-order fidelity), BI-02 (pre-bind blocking — absence of
+  `lifecycle_stage` means implicitly `PRE_BIND`, inherited as-is from Quote Comparison's QC-02,
+  never re-classified), BI-03/BI-05 (field-by-field reconciliation — premium, limits [compared
+  by NUMERIC SIGNATURE, not exact phrasing, so a synthesized "Property $X; GL Y" string
+  correctly reconciles against a single descriptive line covering the same figures], both
+  deductible types, effective date [normalized to real `date` objects before comparing — a
+  same-date-different-format pair, e.g. ISO vs MM/DD/YYYY, must never falsely mismatch]), BI-04
+  (issuance monitoring against the carrier's OWN stated timeline, upper-bound used when a range
+  is given, e.g. "30-45 days"), BI-07 (post-bind ongoing obligations — due date computed as
+  `effective_date + (N-1)` days for a "within N days" clause, verified by hand against the
+  dataset's own worked example: 60 days from an 08/01/2027 binding → due 09/29/2027, not 09/30,
+  confirming "within N days" means before N full days elapse, not N days later).
+  `recompute_live_state` — read-time-only projection (no DB write) for BI-04/BI-07, same deferred
+  "no new scheduler" pattern as Quote Comparison's QC-07 — now the THIRD instance of this
+  deferral in the vertical (FR-26 flags shared infra as overdue; tracked honestly, not silently
+  repeated a third time).
+- `service.py` — `BinderIssuancePipeline`. Branches on which of two genuinely different input
+  shapes a scenario represents: pre-bind (`broker_bind_instruction.json` + optional
+  `carrier_bind_confirmation.txt`) or post-issuance (`bind_record.json` + optional
+  `issued_policy_document_extract.txt`).
+- `router.py` — `/api/es/binder-issuance`: `run`, list, detail (read-time recompute),
+  `resolve-confirmation-discrepancy`/`resolve-policy-discrepancy` (workflow-owned — FR-23's
+  "Accept carrier's version"/"Flag as carrier error" don't map onto the frozen `ReviewAction`
+  enum, per the approved plan), `escalate` (reuses the existing `ReviewAction.ESCALATE`, which
+  already fits). Unlike Quote Comparison, Placement Confirmation/Policy Documents Delivered fire
+  automatically from THIS workflow's own `/run`/resolve actions — the broker doesn't need a
+  separate "select" step here, since BI-06's gate is "a verified-clean reconciliation," not "the
+  broker chose."
+- `agent_communication_hooks.fire_binder_issuance_result` — extends the existing hook module;
+  fires whichever of the two triggers `payload["downstream_triggers_fired"]` already marks
+  eligible (computed by binder_issuance's own service before this hook is ever called).
+- `tests/test_es_binder_issuance.py` — all 6 real Workflow_14 scenarios, the read-time-recompute
+  reminder function directly, and the full discrepancy → resolve → downstream-trigger-release
+  flow for BOTH reconciliation stages end to end.
+
+**Dataset:** `Workflow_14` (E&S · Binder & Policy Issuance — added to DATA_AND_FIXTURES.md's
+mapping table), copied from `Data sets/Workflow 5/binder_issuance_dataset/` into
+`TEST_DATA_ROOT/Workflow_14/test_dataset/` unchanged.
+
+**Key decisions / deviations (pre-approved)**
+- Scheduled monitoring: continue the deferred read-time-recompute pattern rather than building
+  shared Arq infra this pass — FR-26's suggestion is tracked, not silently ignored, in this
+  entry and the FE contract.
+- FR-23's two non-mappable resolution actions: dedicated workflow-owned endpoints
+  (`resolve-confirmation-discrepancy`/`resolve-policy-discrepancy`), not forced onto
+  `APPROVE`/`OVERRIDE`'s existing (different) meanings.
+- No migration — same reasoning as every prior E&S workflow.
+- `bind_record`-stage scenarios (05/06) are treated as already-confirmed-clean by construction —
+  no BI-03 discrepancy data exists at that later stage in this dataset, so
+  `reconciliation_status` defaults to `CLEAN` there. Flagged explicitly in the FE contract as a
+  v1 modeling simplification, not a bug.
+
+**Bug found and fixed via live testing, not just unit tests:** `resolve-policy-discrepancy`
+initially re-fired `placement_confirmation` in addition to `policy_documents_delivered`, because
+the hook was passed the FULL stored payload (whose `placement_confirmation` flag was already
+`true` from ingestion, per the `bind_record`-stage simplification above) rather than just the one
+trigger being resolved. All 9 other pytest tests passed; only Scenario 06's end-to-end handoff
+test caught it (`len(after) == 2`, not `1`) — fixed by passing a minimal single-trigger payload
+snapshot into the hook instead of the whole dict.
+
+**Verification:** `ruff check .` / `mypy src` clean (95 files); `pytest
+tests/test_es_binder_issuance.py` 10/10 pass; full E&S suite (market_matching + package_assembly
++ agent_communication + quote_comparison + binder_issuance) 47/47 pass together. `alembic heads`
+still one head; `alembic check` no drift. `core/common`/`verticals/mga` byte-identical via `git
+status`. Live: app boots, all five vertical route groups + MGA's return 200. Live-verified
+Scenario 03's discrepancy correctly suppresses Placement Confirmation, then
+`resolve-confirmation-discrepancy` correctly releases it (agent-communication list: 13 → 13 → 14).
+Live-verified Scenario 06's issued-policy discrepancy suppresses Policy Documents Delivered.
+Live-verified Scenario 05's overdue alert (`expected_by_date: 2027-09-04`,
+`overdue_alert_fired: true` at `as_of: 2027-09-25`) exactly matching the dataset's own "21 days
+overdue" narrative. Frontend: not touched this phase (no FE work requested for this workflow yet).
+
+### Addendum — Frontend Integration (2026-07-27)
+
+Wired `Insurance OS`'s `/app/workflows/binder-issuance` screen to this workflow — same additive
+pattern as Agent Communication/Quote Comparison's FE integrations, for the same reason.
+
+**What changed**
+- FE: `src/lib/api/binderIssuance.ts` (typed run/list/detail/resolve-confirmation-discrepancy/
+  resolve-policy-discrepancy/escalate calls, reusing `client.ts`), with `FIXTURE_SCENARIOS`
+  (`{ref, label}` pairs — `/run` only needs `scenario_ref`, same shorthand as Quote Comparison).
+- Added a new `LiveBindersSection` to the existing (otherwise untouched) `BinderIssuance` screen:
+  run any of the 6 `Workflow_14` scenarios, real inbox, real detail — bind-order status,
+  visually distinct discrepancy banners for both the bind-confirmation and issued-policy stages
+  with real resolve actions, overdue-issuance alert, post-bind ongoing obligations, and
+  downstream-trigger-fired indicators.
+- **New naming collision surfaced by this workflow**: `binder_issuance/schema.py` and
+  `quote_comparison/schema.py` each define their own `SubjectivityOut` class. openapi-typescript
+  qualified both with their module path once both existed in the same spec, which broke
+  `quoteComparison.ts`'s existing plain `SubjectivityOut` reference — fixed by qualifying it
+  (`verticals__es__workflows__quote_comparison__schema__SubjectivityOut`), same pattern already
+  used for the per-router `ReviewItemOut`/`RunRequest` collisions. No behavior change, purely a
+  generated-type reference fix.
+
+**Key decision — additive, not a replacement (same reasoning as Agent Communication/Quote
+Comparison):** the existing mock's `sendPlacementConfirmation`/`sendPolicyDocsDelivered` are the
+real, working source of 2 of Agent Copilot's 4 mock hand-offs (`placement-confirmation`/
+`policy-docs-delivered`) and had to keep working unmodified. The real backend's hand-off is
+architecturally different anyway — Placement Confirmation/Policy Documents Delivered fire
+automatically server-side the moment a reconciliation is verified-clean (on `/run` or on
+resolving a discrepancy), no broker button or navigation involved. So both stay side by side.
+
+**Verification:** `ruff`/`mypy` clean (95 files); `pytest` 47/47 across all five E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran Scenario 03 — confirmed `DISCREPANCY_FLAGGED`
+with the exact deductible/effective-date mismatch from the FE_CONTRACT sample; resolved it with
+`accept_carrier_version` and confirmed a real `PLACEMENT_CONFIRMATION` draft appeared in Agent
+Communication's list, `bound_terms.deductible_all_perils` correctly reflecting the *reconciled*
+$5,000 (the carrier's confirmed figure), not the originally requested $2,500. SSR smoke test
+across all 18 frontend routes returned 200 with no errors — the mock panels and their hand-offs
+into Agent Copilot confirmed unchanged.
+
 Not committed in either repo — ready for review.

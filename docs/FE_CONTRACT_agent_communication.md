@@ -27,26 +27,36 @@ Auth: Phase-0 header stub — every request needs `x-tenant-id`, `x-user-id`,
 | POST | `/api/es/agent-communication/{item_id}/discard` | Marks the draft discarded (FR-15's third action) |
 | POST | `/api/es/agent-communication/{item_id}/compliance-clear` | **Senior/admin only.** Clears the compliance-review gate on a No Market Found draft |
 
-### Automatic vs. manual triggers (2026-07-24)
+### A 7th trigger type: `POLICY_DOCUMENTS_DELIVERED` (2026-07-27)
+
+Added per Binder & Policy Issuance Coordination's PRD FR-19 (a coordinated
+extension this PRD's own risk register flagged as a follow-on scope item,
+now resolved) — fires once that workflow's BI-05 issued-policy
+reconciliation is verified clean. Same drafting/subject-line/facts pattern
+as every other trigger type; nothing about the endpoint contract above
+changed to accommodate it.
+
+### Automatic vs. manual triggers (2026-07-24, updated 2026-07-27)
 
 `POST /run` above is still the only entry point, but as of `verticals/es/agent_communication_hooks.py`,
-three of the six trigger types now fire it **automatically** — no FE action or manual `/run` call
-needed for these:
+six of the seven trigger types now fire it **automatically** (or semi-automatically) — no manual
+trigger-object construction needed for these:
 
 | Trigger type | Status | Fires from |
 |---|---|---|
 | `NO_MARKET_FOUND` | **Automatic** | `market_matching`'s own `/run`, when the decision is a true zero-match |
 | `SUBMISSION_ACKNOWLEDGMENT` | **Automatic** (per carrier) | `package_assembly`'s own `/run`, when a carrier's package is `READY` |
 | `MISSING_INFO_REQUEST` | **Automatic** (per carrier) | `package_assembly`'s own `/run`, when a carrier's package is `BLOCKED` or `READY_WITH_GAP` |
+| `QUOTE_TERMS_SUMMARY` | **Fed by Quote Comparison, on broker selection** | `quote_comparison`'s `/{item_id}/select/{quote_id}` action — NOT its `/run` (the broker's selection is the trigger, per that PRD's FR-23 ordering). `MULTI_OPTION` cases never auto-fire until the broker picks one. `docs/FE_CONTRACT_quote_comparison.md` has the full detail. |
+| `PLACEMENT_CONFIRMATION` | **Fed by Binder & Issuance, on clean/resolved bind confirmation** | `binder_issuance`'s own `/run` (fires immediately on a clean BI-03 reconciliation) or its `/{item_id}/resolve-confirmation-discrepancy` action (fires once a flagged discrepancy is broker-resolved) — never on an unresolved discrepancy. `docs/FE_CONTRACT_binder_issuance.md` has the full detail. |
+| `POLICY_DOCUMENTS_DELIVERED` | **Fed by Binder & Issuance, on clean/resolved policy reconciliation** | Same workflow's `/run` or `/{item_id}/resolve-policy-discrepancy` action, gated on BI-05 instead of BI-03 |
 | `NO_RESPONSE_FOLLOWUP` | **Manual only, permanently deferred** | Needs elapsed-time-vs-acceptance-window monitoring (FR-11) — an Arq periodic job, not built yet. Still fireable manually. |
-| `QUOTE_TERMS_SUMMARY` | **Manual only, by design** | FR-2 — no automated source until Quote Comparison exists |
-| `PLACEMENT_CONFIRMATION` | **Manual only, by design** | FR-2 — no automated source until Quote Comparison exists |
 
 **What this means for the FE:** nothing — `GET /api/es/agent-communication` already lists every
 draft for the tenant regardless of how it was created, and the response shape is identical either
-way. The FE's existing `FIXTURE_TRIGGERS` buttons remain the only way to fire the 3 manual-only
-types (and still work for the 3 automatic types too, subject to the same FR-5 dedup an auto-fire
-would hit). There is currently no field distinguishing "auto-fired" from "manually-fired" in the
+way. The FE's existing `FIXTURE_TRIGGERS` buttons remain the only way to fire the 1 fully-manual
+type (and still work for the other 6 too, subject to the same FR-5 dedup an auto-fire would
+hit). There is currently no field distinguishing "auto-fired" from "manually-fired" in the
 response — not added, since nothing in the UI depends on that distinction today.
 
 **Known v1 gap:** auto-fired drafts don't have `named_insured` (see `docs/STATUS.md`'s Phase 4

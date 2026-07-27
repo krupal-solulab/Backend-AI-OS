@@ -28,6 +28,7 @@ KNOWN_TRIGGER_TYPES = {
     "QUOTE_TERMS_SUMMARY",
     "PLACEMENT_CONFIRMATION",
     "NO_RESPONSE_FOLLOWUP",
+    "POLICY_DOCUMENTS_DELIVERED",
 }
 
 _TONE_INSTRUCTIONS: dict[str, str] = {
@@ -71,6 +72,14 @@ _TONE_INSTRUCTIONS: dict[str, str] = {
         "urgency to the ACTUAL remaining time in the carrier's acceptance "
         "window given in the facts (RA-TN-05) — do not manufacture urgency "
         "beyond what that window genuinely implies."
+    ),
+    "POLICY_DOCUMENTS_DELIVERED": (
+        "Draft a transaction-complete notice confirming the final policy "
+        "documents have been verified and are attached/forwarded. This fires "
+        "only once Binder & Policy Issuance has confirmed the issued policy "
+        "matches the bound terms exactly (BI-05) — state plainly that the "
+        "policy has been reviewed and matches what was bound, and note the "
+        "next step (documents attached / forwarded separately)."
     ),
 }
 
@@ -140,6 +149,8 @@ def _subject_line(trigger_type: str, data: dict[str, Any]) -> str:
         )
     if trigger_type == "PLACEMENT_CONFIRMATION":
         return f"{named_insured} - Bound with {carrier}" if carrier else f"{named_insured} - Bound"
+    if trigger_type == "POLICY_DOCUMENTS_DELIVERED":
+        return f"{named_insured} - Policy Documents"
     raise ValueError(
         f"_subject_line has no template for {trigger_type!r} "
         "(NO_RESPONSE_FOLLOWUP is resolved via subject_resolver.py, not here)"
@@ -199,6 +210,12 @@ def build_facts(trigger_type: str, data: dict[str, Any]) -> list[ExtractedValue]
             _fact("days_since_original_request", data.get("days_since_original_request")),
             _fact("carrier_acceptance_window_days", data.get("carrier_acceptance_window_days")),
             _fact("days_remaining_in_window", data.get("days_remaining_in_window")),
+        ]
+    elif trigger_type == "POLICY_DOCUMENTS_DELIVERED":
+        specific = [
+            _fact("carrier_name", data.get("carrier_name")),
+            _fact("binder_number", data.get("binder_number")),
+            _fact("verified_terms", data.get("verified_terms")),
         ]
     else:  # pragma: no cover - classify_trigger_type() already validated this
         specific = []

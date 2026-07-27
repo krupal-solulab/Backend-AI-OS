@@ -44,7 +44,9 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 10 | E&S · Market Matching |
 | 11 | E&S · Package Assembly |
 | 12 | E&S · Retail Agent Communication |
-| … | Further E&S workflows continue from 13 |
+| 13 | E&S · Quote Comparison & Recommendation |
+| 14 | E&S · Binder & Policy Issuance Coordination |
+| … | Further E&S workflows continue from 15 |
 > Keep this table in sync as datasets are added.
 
 ### Workflow_10 (E&S Market Matching) layout note
@@ -92,6 +94,40 @@ suite asserts against verbatim (LLM/mock-LLM phrasing varies) — the eval
 instead asserts structural/behavioral properties (correct trigger
 classification, correct carrier scoping, the compliance gate, grounded facts
 present in the draft).
+
+### Workflow_13 (E&S Quote Comparison & Recommendation) layout note
+Unlike Workflow_11/12's single JSON per case, `scenario_XX/` here ships RAW
+carrier-response `.txt` files (unstructured email text, non-uniform
+filenames — `carrier_response_ironclad.txt`, `carrier_response_alt_market.txt`,
+`carrier_response_a.txt`, etc.). `src/fixtures/loader.py` doesn't apply (its
+glob matches `submission_*`, not `scenario_*`, and even if it did, its
+Key:Value-per-line classifier would mis-parse this dataset's multi-line
+subjectivity clauses). `scenario_06` additionally ships a
+`system_check_context.json` giving an explicit "as of" reference date for
+QC-07's validity check (the only scenario that needs one — every other
+scenario's eval test supplies its own "as of" date reflecting roughly when
+its responses arrived). Loaded by
+`verticals/es/workflows/quote_comparison/scenario_loader.py` (E&S-owned) and
+parsed by that workflow's own native `quote_parser.py` — not the shared
+`ExtractionService` (see that module's docstring for the specific, evidenced
+reasons: wrapped subjectivity lines, prose-only declinations, multi-value
+deductible lines).
+
+### Workflow_14 (E&S Binder & Policy Issuance Coordination) layout note
+Input shape genuinely varies BY LIFECYCLE STAGE within this one dataset —
+`scenario_01/03/04` ship `broker_bind_instruction.json` (structured) +
+`carrier_bind_confirmation.txt` (a raw email, same shape family as
+Workflow_13's carrier responses); `scenario_02` ships only the instruction
+(no confirmation — the bind never got sent, per BI-02's blocking test);
+`scenario_05/06` ship `bind_record.json` (a later-stage, already-confirmed
+snapshot) + optionally `issued_policy_document_extract.txt` (a declarations
+page — NOT an email, no headers at all, a third distinct format).
+`src/fixtures/loader.py` doesn't apply for any of this. Loaded by
+`verticals/es/workflows/binder_issuance/scenario_loader.py` (E&S-owned) and
+parsed by that workflow's own native `bind_parser.py` — independent of
+Workflow_13's `quote_parser.py` (no cross-import), per the approved plan:
+the declarations-page format alone is different enough that a shared
+implementation wouldn't fully unify the two anyway.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.
