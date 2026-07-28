@@ -443,3 +443,42 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_diligent_search.py -v
 ```
 
+## E&S Carrier Appetite Intelligence Tracking Copilot (Phase 3 — ninth and LAST E&S workflow in this phase)
+
+Aggregates signals already logged by Quote Comparison/Renewal Remarketing,
+distinguishes genuine class-level appetite-shift patterns from normal
+account-specific decline variance, and auto-updates exactly two metadata
+fields (`appetite_confidence`/`appetite_last_updated`) — never a
+substantive field. This PRD's own Section 0 calls it the highest
+scope-creep risk in the vertical at every prior mention, so the v1 here
+is deliberately narrow and **quiet almost all the time**: 3 of its 4 test
+scenarios produce no suggestion at all. No mutable Carrier Appetite
+Profile store or profile-editing interface exists anywhere in this
+codebase (Market Matching's profiles are read-only JSON), so the
+metadata refresh and any suggestion are computed and recorded in this
+workflow's own payload — a stated limitation, not hidden. Routes under
+`/api/es/carrier-appetite-intelligence`; lives entirely in
+`verticals/es/workflows/carrier_appetite_intelligence/` — see
+`docs/DATA_AND_FIXTURES.md`'s Workflow_18 note.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_02"}' "http://localhost:4000/api/es/carrier-appetite-intelligence/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/carrier-appetite-intelligence"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/carrier-appetite-intelligence/<id>"   # detail
+# dismiss a genuine-inconsistency suggestion the broker declines to act on:
+Invoke-RestMethod -Method Post -Headers $h "http://localhost:4000/api/es/carrier-appetite-intelligence/<id>/dismiss"
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_carrier_appetite_intelligence.md](docs/FE_CONTRACT_carrier_appetite_intelligence.md).
+
+### Run the eval (all 4 real Workflow_18 scenarios — Scenario 03 is the release gate: an account-specific decline reason must never score like Scenario 02's genuine class-level pattern)
+```powershell
+pytest tests/test_es_carrier_appetite_intelligence.py -v
+```
+

@@ -1110,4 +1110,115 @@ above.)
 
 Not committed in either repo — ready for review.
 
+## Phase 3 — E&S Carrier Appetite Intelligence Tracking Copilot ✅ (2026-07-27)
+
+**Scope:** ninth E&S workflow, `verticals/es/workflows/carrier_appetite_intelligence/**` — the
+LAST E&S workflow in Phase 3 (only Phase 4's Pipeline & Carrier Reporting remains). This PRD's own
+Section 0 calls it the highest scope-creep risk in the vertical at every prior mention — v1 stays
+deliberately narrow: aggregate already-logged signals, distinguish genuine class-level shifts from
+account-specific variance, auto-update exactly two metadata fields. No migration; `core/common`
+and `verticals/mga/**` confirmed genuinely untouched via `git status` (zero new files, not just
+unmodified existing ones).
+
+**What was built**
+- `consistency_engine.py` — CI-02's `classify_reason_scope` (class-level vs. account-specific vs.
+  unstated, via keyword heuristic — "no longer written" -> class_level, "this specific account" ->
+  account_specific, "no reason given" -> unstated, counting toward neither), `score_pattern`
+  (verified by hand against all 4 real scenarios before being trusted: Scenario 01 suppresses on
+  volume alone; Scenario 02 finds 2 of 3 recent inconsistent outcomes explicitly class-level ->
+  GENUINE_INCONSISTENCY; Scenario 03's single inconsistent outcome is explicitly account-specific
+  -> contributes ZERO toward class-level evidence, regardless of ratio -> INSUFFICIENT_SIGNAL,
+  never scored like Scenario 02; Scenario 04's 4/4 consistent -> CONFIRMED_CONSISTENT),
+  `compute_metadata_refresh` (CI-03 — returns ONLY `appetite_confidence`/`appetite_last_updated`,
+  ever; no function in this module can touch any other field, per FR-4).
+- `service.py` — `CarrierAppetiteIntelligencePipeline`. Resolves each carrier's REAL stated
+  profile from Workflow_10's actual `carrier_profiles/*.json` fixtures via
+  `decision_core.carrier_profiles.load_carrier_panel` (confirmed CAR-01..CAR-04 all genuinely
+  exist there) rather than relying only on Scenario 02's one inline `stated_profile` field (the
+  other 3 scenarios don't have one).
+- `schema.py` — `CarrierAppetiteEvaluationPayload`, mirroring PRD §7. Two deliberate deviations:
+  `reason_scope` adds a third value, `unstated`, beyond the literal `class_level|account_specific`
+  (an outcome with no captured/recognized reason is genuinely neither); `metadata_refresh` is
+  additive — computed and recorded here, never applied to any real profile, since no mutable
+  Carrier Appetite Profile store exists anywhere in this codebase (Market Matching's profiles are
+  read-only JSON dataclasses, no DB table, no write path).
+- `router.py` — `/api/es/carrier-appetite-intelligence`: `run`, list, detail, `approve` (reuses
+  the existing `ReviewAction.APPROVE` — records approval only, never itself changes any profile
+  data), `dismiss` (workflow-owned — `ReviewAction` has no matching value, same pattern as Agent
+  Communication's `discard`). Every `/run` call enqueues a `ReviewItem` regardless of outcome
+  (same uniform pattern every prior workflow uses), so the standard `GET` list already gives full
+  visibility into every evaluation including suppressed ones — resolving PRD §2.3's
+  suppression-rate health-metric requirement without a dedicated endpoint.
+- `tests/test_es_carrier_appetite_intelligence.py` — all 4 real Workflow_18 scenarios, plus
+  `approve`/`dismiss`. Scenario 03 is the release-gate test: asserts the account-specific decline
+  reason is classified `account_specific` and never produces a suggestion.
+
+**Dataset:** `Workflow_18` (E&S · Carrier Appetite Intelligence Tracking — added to
+DATA_AND_FIXTURES.md's mapping table), copied from
+`Data sets/Workflow 9/carrier_intelligence_dataset/` into `TEST_DATA_ROOT/Workflow_18/test_dataset/`
+unchanged. Only 4 scenarios, deliberately weighted 3-of-4 toward SUPPRESSED — this dataset exists
+to prove the conservative version works, not to showcase detection.
+
+**Key decisions / deviations (pre-approved)**
+- CI-03/FR-6's write-back target: recorded in this workflow's own payload/audit only — no new
+  mutable Carrier Appetite Profile store or migration, since neither Market Matching nor any other
+  part of this codebase has ever built a real profile write path, and building one now would be
+  exactly the scope expansion Section 0 warns against.
+- FR-1's periodic-batch nature: continued the deferred-scheduled-job pattern (5th instance in this
+  vertical) — no new Arq/cron infra, a manual on-demand `/run` per carrier/class scenario_ref.
+- `min_total_outcomes=3` / `min_class_level_inconsistent=2` / 3-outcome recency window: placeholders
+  verified by hand to reproduce all 4 real scenarios exactly, not derived from real operational
+  data (per this project's "every threshold is a placeholder" convention).
+- No new Agent Communication trigger, no cross-workflow re-invocation — re-scanned all 6 FRs; none
+  applies here.
+
+**Verification:** `ruff check .` / `mypy src` clean (124 files); `pytest
+tests/test_es_carrier_appetite_intelligence.py` 6/6 pass; full E&S suite (all nine workflows) green
+together (105 passed overall; the same 11 pre-existing MGA/extraction failures remain, unrelated to
+this change). `alembic heads` still one head; no migration added, so no drift.
+`core/common`/`verticals/mga` byte-identical via `git status` (only `verticals/es/router.py`
+modified, one `include_router` line, plus new files under
+`workflows/carrier_appetite_intelligence/`). Live: app boots, all nine vertical route groups + MGA's
+return 200. Live-verified all 4 scenarios end to end: Scenario 01 suppresses on volume alone;
+Scenario 02 generates a grounded suggestion citing the exact class-level-reasoned declines;
+**Scenario 03 (the release gate) confirmed live to classify its one inconsistent outcome as
+`account_specific` and produce `suggested_action: null`** — never scored like Scenario 02;
+Scenario 04 confirmed to pull Coastal Mutual's REAL `appetite_confidence` ("high") from the actual
+Workflow_10 fixture and refresh only `appetite_confidence`/`appetite_last_updated`, with no other
+field present in `metadata_refresh`. Frontend: not touched this phase (no FE work requested for
+this workflow).
+
+### Addendum — Frontend Integration (2026-07-28)
+
+Wired `Insurance OS`'s `/app/workflows/appetite-intelligence` screen to this workflow — same
+additive pattern as the prior FE integrations (no cross-screen hand-off to preserve; the mock's
+"Approve → apply in profile" button navigates to Submission Market Matching but passes no query
+params that screen's real wiring consumes, so it's harmless to leave as-is).
+
+**What changed**
+- FE: `src/lib/api/carrierAppetiteIntelligence.ts` (typed run/list/detail/approve/dismiss calls,
+  reusing `client.ts`), with `FIXTURE_SCENARIOS` (`{ref, label}` pairs, 4 scenarios).
+- Added a new `LiveSignalsSection` to the existing (otherwise untouched)
+  `CarrierAppetiteIntelligence` screen: run any of the 4 `Workflow_18` scenarios, real inbox
+  (each row shows its `pattern_type`, since most are expected to be `INSUFFICIENT_SIGNAL`/
+  suppressed — the list panel's subtitle also surfaces a running suppressed-count so the "this
+  workflow should be quiet almost all the time" design intent is visible, not just true
+  internally), real detail — pattern-type + status badges, the suggested action banner (shown
+  only when human review is actually pending), the metadata-refresh display (explicitly only
+  ever the two fields), full evidence list with each item's `reason_scope` chip so the
+  class-level-vs-account-specific distinction is visible per claim, and real approve/dismiss
+  actions (shown only for a `PENDING_REVIEW` `GENUINE_INCONSISTENCY`, matching the backend's own
+  gating).
+
+**Verification:** `ruff`/`mypy` clean (124 files); `pytest` 79/79 across all nine E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran all 4 scenarios — confirmed Scenario 01's
+suppression on volume alone; Scenario 02's `GENUINE_INCONSISTENCY` with `SUB-B1`/`SUB-B2` correctly
+tagged `class_level` and `SUB-B3` tagged `unstated` (not counted toward the pattern); **Scenario
+03's account-specific decline correctly suppressed, never scored like Scenario 02's genuine
+pattern** — the core judgment call, reproduced live via the FE's own real API calls; Scenario 04's
+`metadata_refresh` showing `appetite_confidence: "high"` (Coastal Mutual's real profile value) with
+only the two documented keys present. Confirmed `approve` on Scenario 02's suggestion succeeds.
+SSR smoke test across all 18 frontend routes returned 200 with no errors — the mock panel
+confirmed unchanged.
+
 Not committed — ready for review.

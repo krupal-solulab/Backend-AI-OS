@@ -155,7 +155,27 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   reasoning. No new Agent Communication trigger, scheduled job, or cross-workflow re-invocation
 >   — re-scanned all 8 FRs; none applies here.
 >
-> MGA's `verticals/mga/` is untouched by any of the eight.
+> - **Carrier Appetite Intelligence Tracking** (`workflows/carrier_appetite_intelligence/`) — the
+>   LAST E&S workflow in Phase 3, and this PRD's own Section 0 calls it the highest scope-creep
+>   risk in the vertical at every prior mention (Market Matching §2.2, Quote Comparison QC-03,
+>   Renewal Remarketing §2.2) — the v1 built here stays deliberately narrow: aggregate already-
+>   logged signals, distinguish genuine class-level shifts (CI-02) from account-specific variance,
+>   and auto-update exactly two metadata fields (CI-03). CI-02's core judgment call is verified by
+>   hand against all 4 scenarios: an inconsistent outcome with an ACCOUNT-SPECIFIC stated reason
+>   (Scenario 03: "severity exceeded ceiling for this specific account") contributes ZERO toward
+>   class-level evidence, regardless of ratio — never scored like Scenario 02's genuine pattern
+>   (2 of 3 recent declines explicitly citing "class no longer written"). The central architectural
+>   finding: NO mutable Carrier Appetite Profile store or profile-editing interface exists anywhere
+>   in this codebase (Market Matching's `CarrierProfile` is a frozen dataclass loaded fresh from
+>   read-only JSON) — so CI-03's metadata refresh and CI-04's suggestions are computed and
+>   RECORDED in this workflow's own payload, never applied to any real profile, a stated limitation
+>   rather than new shared mutable infrastructure. Resolves each carrier's REAL stated profile from
+>   Workflow_10's `carrier_profiles/*.json` via `decision_core.carrier_profiles.load_carrier_panel`
+>   — E&S-vertical-shared DATA-layer reuse, same precedent as Endorsement's reuse of that module.
+>   FR-1's periodic-batch framing continues this vertical's deferred-scheduled-job pattern for the
+>   5th time — no new Arq/cron infra, a manual on-demand `/run` per carrier/class combination.
+>
+> MGA's `verticals/mga/` is untouched by any of the nine.
 
 ## 6. API namespacing (prevents collisions)
 ```
@@ -164,7 +184,8 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 /api/es/{workflow}/...              e.g. /api/es/market-matching, /api/es/package-assembly,
                                      /api/es/agent-communication, /api/es/quote-comparison,
                                      /api/es/binder-issuance, /api/es/endorsement,
-                                     /api/es/renewal-remarketing, /api/es/diligent-search
+                                     /api/es/renewal-remarketing, /api/es/diligent-search,
+                                     /api/es/carrier-appetite-intelligence
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

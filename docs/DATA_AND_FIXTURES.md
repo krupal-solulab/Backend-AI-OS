@@ -49,7 +49,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 15 | E&S · Endorsement / Mid-Term Change Processing |
 | 16 | E&S · Renewal Remarketing |
 | 17 | E&S · Diligent Search & Compliance Documentation |
-| … | Further E&S workflows continue from 18 |
+| 18 | E&S · Carrier Appetite Intelligence Tracking |
+| … | Further E&S workflows continue from 19 |
 > Row 2 ("MGA · Renewal Management") is an aspirational slot from the original roadmap —
 > that MGA workflow was never built (`verticals/mga/workflows/` is empty, no Workflow_2
 > fixture data exists on disk). Row 16 above is a SEPARATE, actually-built E&S workflow of a
@@ -189,6 +190,24 @@ This workflow's `retention_period_years` output field is always `null` —
 no scenario's input data supplies real state-specific retention reference
 data, and FR-8 calls that "a required discovery input," not something to
 derive from general reasoning.
+
+### Workflow_18 (E&S Carrier Appetite Intelligence Tracking) layout note
+Only 4 scenarios, deliberately weighted 3-of-4 toward SUPPRESSED — this
+dataset exists to prove the conservative version works, not to showcase
+detection. Every `scenario_XX/` folder is just one already-structured
+`signal_log.json` (no raw emails, no new extraction target). Only
+Scenario 02's `signal_log.json` embeds an inline `stated_profile` —
+Scenarios 01/03/04 do not, since this workflow resolves each carrier's
+REAL stated profile from `verticals/es/decision_core/carrier_profiles.py`
+against Workflow_10's real `carrier_profiles/*.json` fixtures (CAR-01
+through CAR-04 all genuinely exist there — confirmed by inspection, not
+assumed). `src/fixtures/loader.py` doesn't apply (glob mismatch). Loaded
+by `verticals/es/workflows/carrier_appetite_intelligence/scenario_loader.py`
+(E&S-owned). This workflow's `metadata_refresh` output field is computed
+and recorded in its own payload only — no mutable Carrier Appetite
+Profile store exists anywhere in this codebase to write into (Market
+Matching's profiles are read-only JSON), so nothing here ever mutates
+Workflow_10's fixture data.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.
