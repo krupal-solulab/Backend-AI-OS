@@ -50,7 +50,8 @@ Each `submission_XX/` = one broker submission: the cover **email** + its **attac
 | 16 | E&S · Renewal Remarketing |
 | 17 | E&S · Diligent Search & Compliance Documentation |
 | 18 | E&S · Carrier Appetite Intelligence Tracking |
-| … | Further E&S workflows continue from 19 |
+| 19 | E&S · Pipeline & Carrier Performance Reporting |
+> Workflow_19 completes the original 10-item E&S workflow roadmap.
 > Row 2 ("MGA · Renewal Management") is an aspirational slot from the original roadmap —
 > that MGA workflow was never built (`verticals/mga/workflows/` is empty, no Workflow_2
 > fixture data exists on disk). Row 16 above is a SEPARATE, actually-built E&S workflow of a
@@ -208,6 +209,26 @@ and recorded in its own payload only — no mutable Carrier Appetite
 Profile store exists anywhere in this codebase to write into (Market
 Matching's profiles are read-only JSON), so nothing here ever mutates
 Workflow_10's fixture data.
+
+### Workflow_19 (E&S Pipeline & Carrier Performance Reporting) layout note
+The 10th and LAST E&S workflow on the original roadmap — a pure
+aggregation/reporting layer, not a per-submission decision workflow.
+Unlike every prior workflow, the 4 scenarios are NOT 4 instances of the
+same shape: each `scenario_XX/underlying_data.json` represents a
+DIFFERENT report kind (clean funnel, carrier hit-rate table, funnel with
+a logging gap, remarketing value categorization), detected from the
+JSON's own top-level keys (`submissions_received` -> funnel,
+`carrier_activity` -> carrier hit-rate, `renewals_reviewed`/
+`remarket_outcomes` -> remarketing value). Scenario 03 signals a data
+gap not via a separate structured field but by substituting a STRING
+where an integer funnel-stage count would normally be — confirm this
+yourself before assuming a dedicated "gap" field exists.
+`src/fixtures/loader.py` doesn't apply (glob mismatch). Loaded by
+`verticals/es/workflows/pipeline_reporting/scenario_loader.py`
+(E&S-owned). No live cross-workflow DB aggregation is attempted — every
+scenario's data is itself a pre-aggregated period snapshot, and nothing
+in this fixture-driven codebase has produced real "Q3 2027" activity to
+query against.
 
 ## How the loader works (`src/fixtures/loader.py`)
 - Reads `TEST_DATA_ROOT` from `.env`.

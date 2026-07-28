@@ -175,7 +175,33 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
 >   FR-1's periodic-batch framing continues this vertical's deferred-scheduled-job pattern for the
 >   5th time — no new Arq/cron infra, a manual on-demand `/run` per carrier/class combination.
 >
-> MGA's `verticals/mga/` is untouched by any of the nine.
+> - **Pipeline & Carrier Performance Reporting** (`workflows/pipeline_reporting/`) — the 10th and
+>   LAST workflow on the ORIGINAL E&S roadmap. A pure aggregation/reporting layer, structurally
+>   different from every prior workflow: its 4 test scenarios each represent a DIFFERENT report
+>   kind (clean funnel, carrier hit-rate, funnel-with-a-gap, remarketing value), detected from the
+>   scenario's own top-level JSON keys, rather than 4 instances of one shape. PR-06 (data
+>   completeness) is this PRD's equivalent of every other workflow's highest-stakes gate — a
+>   funnel-stage value that isn't an int is treated as a logging-gap marker (its text becomes the
+>   gap's reason), and BOTH that stage's own percentage AND the immediately-following stage's
+>   percentage render as explicitly withheld, never interpolated, even though the following stage's
+>   raw count may still be independently reliable. `overall_conversion_pct` is withheld entirely
+>   whenever ANY gap exists anywhere in the funnel, even if both endpoints are individually known —
+>   a clean top-line figure next to a flagged gap would undercut the gap's prominence. PR-02's
+>   carrier list sorts by volume, never by hit-rate, so a low-volume carrier's inflated percentage
+>   (Vantage's 100% of 4) never visually outranks a higher-volume, more reliable one (Ironclad's
+>   63.6% of 22). PR-05 adds a third `remarketing_value` outcome type, `not_remarketed`, beyond the
+>   literal 2-value schema, for accounts that were never actually shopped — distinguishing them from
+>   both a genuine `$` savings figure and a `$0`-savings `confirmation_value` outcome (a remarket
+>   that confirms the incumbent was right, never reported as a failure, per Renewal Remarketing's
+>   own RR-04 precedent). PR-04 (revenue attribution) is fully out of scope — no field anywhere,
+>   per the PRD's own "do not build this rule from assumption." No live cross-workflow DB
+>   aggregation is attempted (every scenario's data is itself a pre-aggregated snapshot this
+>   fixture-driven codebase has no live equivalent of); a Phase-1 `core/reporting` module already
+>   exists but is a generic `AuditEntry` group-by-count rollup that doesn't match this dataset's
+>   shape, so it isn't used here. No `approve`/`escalate` router actions, unlike every prior
+>   workflow — a report isn't a determination a human approves or declines.
+>
+> MGA's `verticals/mga/` is untouched by any of the ten.
 
 ## 6. API namespacing (prevents collisions)
 ```
@@ -185,7 +211,8 @@ Vertical entities extend/reference these (e.g. MGA `AppetiteResult`, `Quote`, `B
                                      /api/es/agent-communication, /api/es/quote-comparison,
                                      /api/es/binder-issuance, /api/es/endorsement,
                                      /api/es/renewal-remarketing, /api/es/diligent-search,
-                                     /api/es/carrier-appetite-intelligence
+                                     /api/es/carrier-appetite-intelligence,
+                                     /api/es/pipeline-reporting
 ```
 A dev only adds routes under their own `/{vertical}/{workflow}` namespace.
 

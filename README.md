@@ -482,3 +482,41 @@ The FE wiring spec (endpoints + real sample JSON + field mapping) is in
 pytest tests/test_es_carrier_appetite_intelligence.py -v
 ```
 
+## E&S Pipeline & Carrier Performance Reporting Copilot (Phase 4 — 10th and LAST workflow on the original E&S roadmap)
+
+A pure aggregation/reporting layer over the six prior workflows' logs —
+not a new decision/classification workflow. Generates a pipeline funnel
+view, carrier hit-rate comparisons, or remarketing value reports
+(detected from the scenario's own data shape — unlike every prior
+workflow, its 4 test scenarios each test a DIFFERENT report kind, not 4
+instances of the same shape). Its entire credibility rests on never
+smoothing over a data gap (PR-06 — a direct throughline back to this
+project's very first critique, the original landing page's fabricated
+dashboard stats) and never presenting a low-volume figure with false
+confidence (PR-02). Routes under `/api/es/pipeline-reporting`; lives
+entirely in `verticals/es/workflows/pipeline_reporting/` — see
+`docs/DATA_AND_FIXTURES.md`'s Workflow_19 note. Unlike every prior
+workflow, there's no `approve`/`escalate` action — a report isn't a
+determination a human approves or declines.
+
+```powershell
+python src/core/seed.py        # demo-es tenant
+uvicorn main:app --app-dir src --reload --port 4000
+```
+```powershell
+$h = @{ "x-tenant-id"="demo-es"; "x-user-id"="demo-es-junior"; "x-role"="junior" }
+Invoke-RestMethod -Method Post -Headers $h -ContentType application/json `
+  -Body '{"scenario_ref":"scenario_03"}' "http://localhost:4000/api/es/pipeline-reporting/run"
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/pipeline-reporting"        # list
+Invoke-RestMethod -Headers $h "http://localhost:4000/api/es/pipeline-reporting/<id>"   # detail
+```
+The FE wiring spec (endpoints + real sample JSON + field mapping) is in
+[docs/FE_CONTRACT_pipeline_reporting.md](docs/FE_CONTRACT_pipeline_reporting.md).
+
+### Run the eval (all 4 real Workflow_19 scenarios — Scenario 03 is the release gate: a logging gap must never be silently interpolated or omitted)
+```powershell
+pytest tests/test_es_pipeline_reporting.py -v
+```
+
+**This completes the original 10-item E&S workflow roadmap.**
+

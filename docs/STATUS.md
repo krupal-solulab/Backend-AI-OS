@@ -1222,3 +1222,127 @@ SSR smoke test across all 18 frontend routes returned 200 with no errors — the
 confirmed unchanged.
 
 Not committed — ready for review.
+
+## Phase 4 — E&S Pipeline & Carrier Performance Reporting Copilot ✅ (2026-07-28)
+
+**Scope:** 10th and LAST workflow on the ORIGINAL E&S roadmap,
+`verticals/es/workflows/pipeline_reporting/**` — a pure aggregation/reporting layer over the six
+prior workflows' logs, not a new decision/classification workflow. No migration; `core/common` and
+`verticals/mga/**` confirmed genuinely untouched via `git status` (zero new files, not just
+unmodified existing ones).
+
+**What was built**
+- `reporting_engine.py` — `build_funnel` (PR-01/PR-06: any funnel-stage value that isn't an `int`
+  is treated as a logging-gap marker, its text becomes the gap's `reason`; both that stage's own
+  percentage AND the immediately-following stage's percentage render as explicitly withheld, never
+  interpolated — verified live against Scenario 03: `Compared & Selected` gets `count: null`, and
+  `Bound`'s raw count (47) still shows since bind logging itself is unaffected, but `Bound`'s own
+  `pct_of_prior_stage` is ALSO `null` since its denominator is unknown; `overall_conversion_pct` is
+  withheld whenever ANY gap exists anywhere in the funnel, even if both endpoints are individually
+  known), `build_carrier_performance` (PR-02: sorted by `submissions_approached` DESCENDING, never
+  by hit-rate, so Vantage's 100%-of-4 never visually outranks Ironclad's 63.6%-of-22;
+  `low_volume_flag` below a placeholder `MIN_RELIABLE_VOLUME=10`), `categorize_remarket_outcome`
+  (PR-05: three genuinely distinct outcomes — `savings_identified`, `confirmation_value` for a
+  `$0`-savings confirmed-incumbent result, and an additive third value, `not_remarketed`, for
+  accounts never actually shopped, beyond the literal 2-value schema).
+- `service.py` — `PipelineReportingPipeline`. Detects which of 3 report kinds a scenario represents
+  from its own top-level JSON keys (`submissions_received` -> funnel, `carrier_activity` -> carrier
+  hit-rate, `renewals_reviewed`/`remarket_outcomes` -> remarketing value) — unlike every prior
+  workflow, this dataset's 4 scenarios are NOT 4 instances of one shape. No live cross-workflow DB
+  aggregation attempted — every scenario's data is itself a pre-aggregated period snapshot this
+  fixture-driven codebase has no live equivalent of; confirmed a Phase-1 `core/reporting` module
+  already exists (`DefaultReportingService.rollup()`) but is a generic `AuditEntry`
+  group-by-dimension count that doesn't match this dataset's shape, so it isn't used here.
+- `schema.py` — `PipelineReportPayload`, mirroring PRD §7 closely, plus additive
+  `overall_conversion_pct`/`carrier_performance[].overall_hit_rate` (both appear in the dataset's
+  own expected output) and the `not_remarketed` outcome-type addition above. No revenue-attribution
+  field anywhere (PR-04) — explicitly out of scope per the PRD's own "do not build this rule from
+  assumption," and no scenario exercises it.
+- `router.py` — `/api/es/pipeline-reporting`: `run`, list, detail ONLY — no `approve`/`escalate`,
+  unlike every prior workflow, since a report isn't a determination or draft communication a human
+  approves or declines; every `/run` call still enqueues a `ReviewItem` for audit/history
+  visibility (same uniform pattern every prior workflow uses).
+- `tests/test_es_pipeline_reporting.py` — all 4 real Workflow_19 scenarios. Scenario 03 is the
+  release-gate test: asserts the gapped stage's `count`/`pct_of_prior_stage` are both `null`, the
+  following stage's raw count still shows but its own percentage is also `null`, and
+  `overall_conversion_pct` is withheld entirely.
+
+**Dataset:** `Workflow_19` (E&S · Pipeline & Carrier Performance Reporting — added to
+DATA_AND_FIXTURES.md's mapping table, with an explicit note that this completes the original
+10-item E&S roadmap), copied from `Data sets/Workflow 10/pipeline_reporting_dataset/` into
+`TEST_DATA_ROOT/Workflow_19/test_dataset/` unchanged.
+
+**Key decisions / deviations (pre-approved)**
+- No live cross-workflow DB aggregation — `ingest()` loads the scenario's own pre-aggregated JSON
+  directly, same "no new extraction target" precedent as Renewal Remarketing/Diligent
+  Search/Carrier Appetite Intelligence; a real live aggregator over `ReviewItem`/`AuditEntry` rows
+  is flagged as valuable future scope, not something this pass builds or can validate.
+- Router scope: `run`/`list`/`detail` only, no action endpoints — a genuinely different call from
+  every prior workflow, since nothing here is being gated.
+- `not_remarketed` added as a third `outcome_type` value rather than force-fitting or silently
+  dropping never-remarketed accounts from the report.
+- `MIN_RELIABLE_VOLUME=10` is a placeholder, verified by hand to keep Ironclad (22) above and
+  Vantage (4) below the threshold — not derived from real operational data.
+- FR-1's "scheduled or on-demand" framing: continued the deferred-scheduled-job pattern (6th
+  instance in this vertical) — no new Arq/cron infra, a manual on-demand `/run` per scenario_ref.
+- No new Agent Communication trigger, no cross-workflow re-invocation — re-scanned all 6 FRs; none
+  applies here.
+
+**Verification:** `ruff check .` / `mypy src` clean (131 files); `pytest
+tests/test_es_pipeline_reporting.py` 5/5 pass; full E&S suite (all ten workflows) green together
+(110 passed overall; the same 11 pre-existing MGA/extraction failures remain, unrelated to this
+change). `alembic heads` still one head; no migration added, so no drift.
+`core/common`/`verticals/mga` byte-identical via `git status` (only `verticals/es/router.py`
+modified, one `include_router` line, plus new files under `workflows/pipeline_reporting/`). Live:
+app boots, all ten vertical route groups + MGA's return 200. Live-verified all 4 scenarios end to
+end: Scenario 01's clean funnel (`overall_conversion_pct: 56.0` — precise math on `47/84`, not the
+dataset's own illustrative-prose figure of "55.9%," which is a minor hand-authoring imprecision,
+same "illustrative, not literal" precedent as every prior workflow's `expected_output.txt`);
+Scenario 02's carrier list correctly ordered by volume (Ironclad before Vantage) with Vantage
+flagged low-volume; **Scenario 03 (the release gate) confirmed live to render the gapped stage's
+`count`/`pct_of_prior_stage` as `null`, `Bound`'s raw count as still-reliable (47) with its own
+percentage also `null`, and `overall_conversion_pct` withheld entirely**; Scenario 04's Summit
+Roofing `$0`-savings outcome confirmed to render as `confirmation_value` (never a failure) and
+Clearpath's never-shopped account confirmed distinct as `not_remarketed`. Frontend: not touched
+this phase (no FE work requested for this workflow).
+
+**This completes the original 10-item E&S workflow roadmap.**
+
+### Addendum — Frontend Integration (2026-07-28)
+
+Wired `Insurance OS`'s `/app/workflows/pipeline-reporting` screen to this workflow — same
+additive pattern as the prior FE integrations (no cross-screen hand-off to preserve; `retailAgents`
+is the one mock array this screen shares with Agent Copilot's mock, but neither this integration
+nor any prior one touches `mocks.ts`, so that sharing is unaffected). **This is the tenth and
+last FE integration, completing the frontend wiring for the entire original E&S roadmap
+alongside the backend.**
+
+**What changed**
+- FE: `src/lib/api/pipelineReporting.ts` (typed run/list/detail calls only — no approve/dismiss/
+  escalate, matching this workflow's own scope: a report isn't a determination), with
+  `FIXTURE_SCENARIOS` (`{ref, label}` pairs, 4 scenarios).
+- Added a new `LiveReportsSection` to the existing (otherwise untouched)
+  `PipelineCarrierReporting` screen: run any of the 4 `Workflow_19` scenarios, real inbox, real
+  detail — a data-completeness banner shown first and prominently (never a footnote), a funnel
+  view where a gapped stage renders as an explicit dashed "data gap" block rather than a zero or
+  omitted row (with the following stage's percentage separately confirmed withheld), the
+  overall-conversion figure explicitly showing "withheld, gap present" instead of a number when
+  any gap exists, a carrier hit-rate table in the real (volume-sorted, not rate-sorted) order with
+  a low-volume badge, and the remarketing-value list with all three outcome types distinguished by
+  tone (never rendering a `confirmation_value` with the same visual weight as a real failure).
+
+**Verification:** `ruff`/`mypy` clean (131 files); `pytest` 84/84 across all ten E&S workflows;
+`tsc`/`eslint`/`npm run build` all clean. Live: ran all 4 scenarios through the FE's own real API
+calls — confirmed Scenario 01's clean funnel (`56.0%`); Scenario 02's carrier order (Ironclad
+before Vantage despite Vantage's higher rate) with Vantage's low-volume flag set; **Scenario 03's
+release-gate behavior reproduced end to end** — the gapped stage's `count`/`pct_of_prior_stage`
+both null, `Bound`'s own count (47) still showing while its percentage is withheld, and
+`overall_conversion_pct` absent entirely; Scenario 04's Summit Roofing rendering as
+`confirmation_value` and Clearpath as the distinct `not_remarketed` state, both with no
+`savings_amount`. SSR smoke test across all 18 frontend routes returned 200 with no errors — the
+mock panel confirmed unchanged.
+
+**All ten E&S workflows are now wired end to end, frontend and backend, across this entire
+session.**
+
+Not committed — ready for review.
