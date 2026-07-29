@@ -55,6 +55,7 @@ from verticals.es.workflows.renewal_remarketing.schema import (
     ExposureChangeOut,
     IncumbentStatusOut,
     LossHistoryChangeOut,
+    ReasoningCitationOut,
     RemarketDecisionPayload,
     RemarketExecutionOut,
     TriggerDecisionOut,
@@ -63,6 +64,14 @@ from verticals.es.workflows.renewal_remarketing.schema import (
 
 WORKFLOW_NAME = "renewal_remarketing"
 DEFAULT_WORKFLOW_N = 16  # Workflow_16 in TEST_DATA_ROOT — see DATA_AND_FIXTURES.md
+
+# FR-19: renewal reviews are generated on-demand (via /run) rather than by a
+# real scheduled/recurring job. No workflow anywhere in this codebase has
+# actual scheduler/cron infrastructure yet — every other PRD's "scheduled
+# process" mention resolves to on-demand or read-time recompute in the real
+# implementation (see Quote Comparison's/Binder Issuance's read-time
+# recompute pattern) — so this is deliberate v1 scope, consistent with that
+# project-wide precedent, not an oversight specific to this workflow.
 
 
 class RenewalRemarketingPipeline:
@@ -250,7 +259,13 @@ class RenewalRemarketingPipeline:
                 remarketing_history_detail=self._history.detail,
                 trigger_decision=TriggerDecisionOut(
                     level=self._trigger.level,
-                    reasoning=TriggerReasoningOut(summary=self._trigger.reasoning),
+                    reasoning=TriggerReasoningOut(
+                        summary=self._trigger.reasoning,
+                        citations=[
+                            ReasoningCitationOut(claim=claim, source=source)
+                            for claim, source in self._trigger.citations
+                        ],
+                    ),
                 ),
                 remarket_execution=remarket_execution,
             )

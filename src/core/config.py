@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # ── Test data / fixtures ─────────────────────────
     test_data_root: str = ""
 
+    # ── Quote Comparison recommendation weighting (QC-04/FR-18) ─────
+    # Default price_weight=1.0/subjectivity_penalty=0.0 reproduces the
+    # original pure-premium ranking exactly — configurable, not hardcoded.
+    quote_rank_price_weight: float = 1.0
+    quote_rank_subjectivity_penalty: float = 0.0
+
 
 @lru_cache
 def get_settings() -> Settings:

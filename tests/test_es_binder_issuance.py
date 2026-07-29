@@ -30,13 +30,22 @@ from verticals.es.workflows.agent_communication.router import list_agent_communi
 from verticals.es.workflows.binder_issuance.coordination_engine import recompute_live_state
 from verticals.es.workflows.binder_issuance.router import (
     ResolveDiscrepancyRequest,
+    RunFromQuoteRequest,
     RunRequest,
     escalate,
     resolve_confirmation_discrepancy,
     resolve_policy_discrepancy,
     run_binder_issuance,
+    run_binder_issuance_from_quote,
 )
 from verticals.es.workflows.binder_issuance.service import BinderIssuancePipeline
+from verticals.es.workflows.quote_comparison.router import (
+    RunRequest as QuoteRunRequest,
+)
+from verticals.es.workflows.quote_comparison.router import (
+    run_quote_comparison,
+    select_quote,
+)
 
 pytestmark = pytest.mark.skipif(
     not get_settings().test_data_root,
@@ -236,3 +245,49 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "binder_issuance"})
     assert len(entries) == 1
+
+
+async def test_run_from_quote_comparison_uses_real_selected_terms(es_ctx, es_session) -> None:
+    """Quote Comparison -> Binder & Policy Issuance (Phase 2 connectivity):
+    a real pre-bind pass built from an ACTUAL, just-selected Quote
+    Comparison quote (Meridian's real scenario_01 offer), not the
+    Workflow_14 fixture — including carrier_id resolved from the real
+    Carrier Appetite Profile panel (Quote Comparison itself never sets
+    carrier_id)."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    meridian_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Meridian Excess & Surplus"
+    )
+    await select_quote(qc_item.id, meridian_quote.quote_id, es_ctx, es_session)
+
+    items = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    payload = items.payload
+    assert payload.carrier_name == "Meridian Excess & Surplus"
+    assert payload.carrier_id == "CAR-01"  # resolved via the real carrier panel, by name
+    assert payload.requested_bind_terms.premium == 24900.0
+    assert payload.requested_bind_terms.deductible_all_perils == 2500.0
+    assert payload.requested_bind_terms.effective_date == "2027-09-01"
+    # Meridian's one material subjectivity (remaining loss history) carries
+    # over as still-open, pre-bind — the only honest values at this point.
+    material = [s for s in payload.pre_bind_subjectivities if s.materiality == "material"]
+    assert material and all(
+        s.status == "open" and s.lifecycle_stage == "PRE_BIND" for s in material
+    )
+    # That same material subjectivity blocks the bind order (BI-02) —
+    # correct, real behavior, not a live-path defect.
+    assert payload.bind_order_status == "BLOCKED"
+
+
+async def test_run_from_quote_comparison_requires_a_selection_first(es_ctx, es_session) -> None:
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await run_binder_issuance_from_quote(
+            RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+        )
+    assert exc_info.value.status_code == 409

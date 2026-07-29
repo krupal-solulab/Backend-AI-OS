@@ -25,6 +25,7 @@ from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
 from core.tenancy.dependencies import get_ctx
 from verticals.es.agent_communication_hooks import fire_no_market_found
+from verticals.es.diligent_search_hooks import fire_diligent_search_required
 from verticals.es.workflows.market_matching.schema import MarketMatchingPayload
 from verticals.es.workflows.market_matching.service import (
     DEFAULT_WORKFLOW_N,
@@ -80,6 +81,7 @@ async def run_market_matching(body: RunRequest, ctx: CtxDep, session: SessionDep
     review_queue = DefaultReviewQueueService()
     item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
     await fire_no_market_found(session, ctx, output)  # additive, no-throw — see module docstring
+    await fire_diligent_search_required(session, ctx, output)  # additive, no-throw — MM-07
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=output.payload,

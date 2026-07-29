@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.common.dtos import (
     Ctx,
     Decision,
@@ -32,6 +34,7 @@ from core.common.dtos import (
 )
 from core.common.enums import DecisionOutcome
 from core.llm.service import LLMService
+from verticals.es.workflows.pipeline_reporting.live_aggregator import build_live_underlying_data
 from verticals.es.workflows.pipeline_reporting.reporting_engine import (
     CarrierPerformance,
     FunnelResult,
@@ -251,6 +254,29 @@ class PipelineReportingPipeline:
 
     async def run(self, ctx: Ctx, inp: WorkflowInput) -> OutputPackage:
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, session: AsyncSession) -> OutputPackage:
+        """Additive live-aggregation entry point, alongside ``run()``'s
+        fixture-scenario path above. Unlike a single scenario (which always
+        exercises exactly one report "kind"), this computes all three
+        sections — funnel, carrier performance, remarketing value — at once
+        from real cross-workflow data. See ``live_aggregator.py`` for the
+        exact mapping and its honest limitations (no revenue attribution,
+        savings only computed for a real recorded carrier switch)."""
+        underlying = await build_live_underlying_data(session, ctx)
+        self._period = "Live (current data)"
+        self._kind = "funnel"  # so decide()/package()'s gap-handling logic below applies
+        self._funnel = build_funnel(underlying)
+        self._carriers = build_carrier_performance(underlying["carrier_activity"])
+        self._remarket = [
+            categorize_remarket_outcome(o) for o in underlying["remarket_outcomes"]
+        ]
+
+        raw = RawBundle(submission_id=self._period)
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

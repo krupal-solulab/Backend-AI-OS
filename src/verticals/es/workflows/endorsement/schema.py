@@ -30,6 +30,7 @@ class ProrationInputsOut(BaseModel):
     days_elapsed: int
     days_remaining: int
     term_total_days: int
+    unusual_timing_flag: str | None = None
 
 
 class PremiumImpactOut(BaseModel):

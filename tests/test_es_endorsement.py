@@ -167,6 +167,35 @@ async def test_scenario_06_routine_headcount_control_case(es_ctx) -> None:
     proration = payload["premium_impact"]["proration_inputs"]
     assert proration["days_remaining"] == 309
     assert proration["term_total_days"] == 366
+    assert proration["unusual_timing_flag"] is None
+
+
+def test_ep06_unusual_timing_flag_synthetic() -> None:
+    """EP-06/FR-10: unusual timing must be flagged — out-of-term (before
+    effective date or after expiration) and too-close-to-expiration cases.
+    None of the 6 real scenarios exercise this, so synthetic dates are used
+    here, kept entirely separate from the scenario-based tests above."""
+    from datetime import date
+
+    from verticals.es.workflows.endorsement.classification_engine import proration_inputs
+
+    effective = date(2027, 1, 1)
+    expiration = date(2028, 1, 1)  # 365-day term
+
+    normal = proration_inputs(effective, expiration, date(2027, 6, 1))
+    assert normal.unusual_timing_flag is None
+
+    before_term = proration_inputs(effective, expiration, date(2026, 12, 1))
+    assert before_term.days_elapsed < 0
+    assert "before the policy's own effective date" in before_term.unusual_timing_flag
+
+    after_term = proration_inputs(effective, expiration, date(2028, 2, 1))
+    assert after_term.days_remaining < 0
+    assert "would need to be renewed first" in after_term.unusual_timing_flag
+
+    near_expiration = proration_inputs(effective, expiration, date(2027, 12, 20))
+    assert 0 <= near_expiration.days_remaining < 30
+    assert "close to expiration" in near_expiration.unusual_timing_flag
 
 
 async def test_send_and_escalate_actions(es_ctx, es_ctx_senior, es_session) -> None:

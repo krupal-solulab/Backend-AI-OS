@@ -154,10 +154,23 @@ def _is_urgent(quote: Quote, as_of: date, threshold_days: int) -> bool:
     return any(s.materiality == "material" for s in quote.parsed.subjectivities)
 
 
+def _rank_score(quote: Quote, price_weight: float, subjectivity_penalty: float) -> float:
+    """QC-04/FR-18: configurable ranking basis — price plus a $-equivalent
+    penalty per material subjectivity, rather than a hardcoded single-factor
+    (price-only) default. ``subjectivity_penalty=0.0`` (the default) makes
+    this mathematically identical to a pure-premium sort — see
+    ``core.config.Settings.quote_rank_subjectivity_penalty``."""
+    premium = quote.parsed.premium if quote.parsed.premium is not None else float("inf")
+    material_count = sum(1 for s in quote.parsed.subjectivities if s.materiality == "material")
+    return price_weight * premium + subjectivity_penalty * material_count
+
+
 def recommend(
     quotes: list[Quote],
     as_of: date,
     threshold_days: int = VALIDITY_URGENCY_THRESHOLD_DAYS,
+    price_weight: float = 1.0,
+    subjectivity_penalty: float = 0.0,
 ) -> RecommendationResult:
     """QC-06: mode selection. Never defaults to a false single winner out of
     a genuine trade-off (per the interpretation guide's own warning)."""
@@ -178,7 +191,9 @@ def recommend(
                 comparability=comparability,
                 urgency_flags=urgency_flags,
             )
-        ranked = sorted(viable, key=lambda q: q.parsed.premium or float("inf"))
+        ranked = sorted(
+            viable, key=lambda q: _rank_score(q, price_weight, subjectivity_penalty)
+        )
         primary, secondary = ranked[0], ranked[1]
         primary_material = [s for s in primary.parsed.subjectivities if s.materiality == "material"]
         if primary_material:

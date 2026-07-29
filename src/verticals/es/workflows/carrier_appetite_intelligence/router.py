@@ -37,6 +37,9 @@ from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
+from verticals.es.workflows.carrier_appetite_intelligence.live_signal_builder import (
+    discover_live_carriers,
+)
 from verticals.es.workflows.carrier_appetite_intelligence.schema import (
     CarrierAppetiteEvaluationPayload,
 )
@@ -109,6 +112,31 @@ async def run_carrier_appetite_intelligence(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=CarrierAppetiteEvaluationPayload(**output.payload),
     )
+
+
+@router.post("/run-live", status_code=status.HTTP_201_CREATED)
+async def run_carrier_appetite_intelligence_live(
+    ctx: CtxDep, session: SessionDep
+) -> list[ReviewItemOut]:
+    """Additive alongside ``/run`` above: evaluates every carrier with a
+    real, classifiable declination signal already logged by Quote
+    Comparison for this tenant — the genuine cross-workflow aggregation
+    CI-01 describes, built from actual OutputPackage rows rather than the
+    Workflow_18 fixture. See ``live_signal_builder.py``."""
+    carriers = await discover_live_carriers(session, ctx)
+    review_queue = DefaultReviewQueueService()
+    items: list[ReviewItemOut] = []
+    for c in carriers:
+        pipeline = _pipeline()
+        output = await pipeline.run_live(ctx, session, c["carrier_name"])
+        item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+        items.append(
+            ReviewItemOut(
+                id=item.id, submission_id=item.submission_id, status=item.status.value,
+                payload=CarrierAppetiteEvaluationPayload(**output.payload),
+            )
+        )
+    return items
 
 
 @router.get("")

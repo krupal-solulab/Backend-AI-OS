@@ -280,6 +280,7 @@ class EndorsementPipeline:
                     days_elapsed=self._proration.days_elapsed,
                     days_remaining=self._proration.days_remaining,
                     term_total_days=self._proration.term_total_days,
+                    unusual_timing_flag=self._proration.unusual_timing_flag,
                 )
                 if self._proration else None
             ),

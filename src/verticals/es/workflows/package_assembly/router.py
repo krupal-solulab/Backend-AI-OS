@@ -5,7 +5,8 @@ E&S dev touches to mount a workflow.
 
 from __future__ import annotations
 
-from typing import Annotated
+import asyncio
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
 from verticals.es.agent_communication_hooks import fire_package_assembly_result
+from verticals.es.workflows.package_assembly.live_ingestion import discover_live_carrier_ids
 from verticals.es.workflows.package_assembly.scenario_loader import all_carrier_ids, load_scenario
 from verticals.es.workflows.package_assembly.schema import PackageAssemblyPayload
 from verticals.es.workflows.package_assembly.service import (
@@ -52,6 +54,11 @@ class RunRequest(BaseModel):
     carrier_id: str | None = None  # omit to assemble ALL selected carriers (FR-2/FR-23)
 
 
+class RunFromMarketMatchingRequest(BaseModel):
+    market_matching_review_item_id: str
+    carrier_id: str | None = None  # omit to assemble ALL matched carriers (FR-2/FR-23)
+
+
 class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
@@ -60,25 +67,42 @@ class ReviewItemOut(BaseModel):
     payload: PackageAssemblyPayload | None = None
 
 
+async def _run_one_carrier(ctx: Ctx, scenario_ref: str, carrier_id: str) -> tuple[str, Any]:
+    """The slow, per-carrier work (extraction lookup + LLM draft) — touches
+    only `ctx`, never the shared AsyncSession, so callers may run several of
+    these concurrently (FR-23) and only need to serialize the DB writes that
+    follow."""
+    pipeline = _pipeline()
+    inp = WorkflowInput(source_ref=scenario_ref, params={"carrier_id": carrier_id})
+    output = await pipeline.run(ctx, inp)
+    return carrier_id, output
+
+
+
+
 @router.post("/run", status_code=status.HTTP_201_CREATED)
 async def run_package_assembly(
     body: RunRequest, ctx: CtxDep, session: SessionDep
 ) -> list[ReviewItemOut]:
     """Runs one independent assembly pass per selected carrier (FR-2/FR-4:
     never one shared result reused across carriers) and enqueues each as its
-    own, independently reviewable ReviewItem (FR-18)."""
+    own, independently reviewable ReviewItem (FR-18). Per FR-23, a
+    multi-carrier selection generates concurrently rather than waiting on
+    each carrier's LLM call in turn — only the DB writes below stay
+    sequential, since an AsyncSession isn't safe to share across concurrent
+    coroutines."""
     scenario = load_scenario(DEFAULT_WORKFLOW_N, body.scenario_ref)
     carrier_ids = [body.carrier_id] if body.carrier_id else all_carrier_ids(scenario)
+
+    results = await asyncio.gather(
+        *(_run_one_carrier(ctx, body.scenario_ref, carrier_id) for carrier_id in carrier_ids)
+    )
 
     review_queue = DefaultReviewQueueService()
     audit = DefaultAuditService()
     items: list[ReviewItemOut] = []
 
-    for carrier_id in carrier_ids:
-        pipeline = _pipeline()
-        inp = WorkflowInput(source_ref=body.scenario_ref, params={"carrier_id": carrier_id})
-        output = await pipeline.run(ctx, inp)
-
+    for carrier_id, output in results:
         item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
         await fire_package_assembly_result(session, ctx, output)  # additive, no-throw hook
         await audit.record(
@@ -88,6 +112,54 @@ async def run_package_assembly(
                 what=f"package generated: status={output.decision.outcome.value}",
                 workflow=WORKFLOW_NAME, tenant_id=ctx.tenant_id, vertical=ctx.vertical,
                 detail={"carrier_id": carrier_id, "scenario_ref": body.scenario_ref},
+            ),
+        )
+        items.append(
+            ReviewItemOut(
+                id=item.id, submission_id=item.submission_id, carrier_id=carrier_id,
+                status=item.status.value, payload=output.payload,
+            )
+        )
+    return items
+
+
+@router.post("/run-from-market-matching", status_code=status.HTTP_201_CREATED)
+async def run_package_assembly_from_market_matching(
+    body: RunFromMarketMatchingRequest, ctx: CtxDep, session: SessionDep
+) -> list[ReviewItemOut]:
+    """Additive alongside ``/run`` above: assembles a real package per
+    carrier from an ACTUAL Market Matching review item instead of a
+    Workflow_11 fixture. See ``live_ingestion.py``. Runs carriers
+    sequentially (unlike ``/run``'s ``asyncio.gather``) since each pass
+    reads real data through the one shared ``AsyncSession``, which isn't
+    safe to touch from concurrent coroutines."""
+    carrier_ids = (
+        [body.carrier_id]
+        if body.carrier_id
+        else await discover_live_carrier_ids(session, ctx, body.market_matching_review_item_id)
+    )
+
+    review_queue = DefaultReviewQueueService()
+    audit = DefaultAuditService()
+    items: list[ReviewItemOut] = []
+
+    for carrier_id in carrier_ids:
+        pipeline = _pipeline()
+        output = await pipeline.run_live(
+            ctx, session, body.market_matching_review_item_id, carrier_id
+        )
+        item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+        await fire_package_assembly_result(session, ctx, output)  # additive, no-throw hook
+        await audit.record(
+            session, ctx,
+            AuditEntry(
+                actor="ai", who="system",
+                what=f"package generated (live): status={output.decision.outcome.value}",
+                workflow=WORKFLOW_NAME, tenant_id=ctx.tenant_id, vertical=ctx.vertical,
+                detail={
+                    "carrier_id": carrier_id,
+                    "market_matching_review_item_id": body.market_matching_review_item_id,
+                },
             ),
         )
         items.append(

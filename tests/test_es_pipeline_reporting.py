@@ -23,8 +23,13 @@ from core.common.dtos import Ctx, WorkflowInput
 from core.common.enums import DecisionOutcome, Role, Vertical
 from core.config import get_settings
 from core.llm import build_llm_service
+from core.models import OutputPackage as OutputPackageRow
 from core.models import Tenant
-from verticals.es.workflows.pipeline_reporting.router import RunRequest, run_pipeline_reporting
+from verticals.es.workflows.pipeline_reporting.router import (
+    RunRequest,
+    run_pipeline_reporting,
+    run_pipeline_reporting_live,
+)
 from verticals.es.workflows.pipeline_reporting.service import PipelineReportingPipeline
 
 pytestmark = pytest.mark.skipif(
@@ -131,3 +136,117 @@ async def test_run_endpoint(es_ctx, es_session) -> None:
     item = await run_pipeline_reporting(body, es_ctx, es_session)
     assert item.status == "pending"
     assert item.payload.period == "Q3 2027"
+
+
+async def test_run_live_aggregates_real_cross_workflow_rows(es_ctx, es_session) -> None:
+    """The additive live-aggregation path (PR-01's real cross-workflow
+    read): inserts real OutputPackage rows directly (same shape each real
+    workflow's own service.py produces) across market_matching,
+    package_assembly, quote_comparison, binder_issuance, and
+    renewal_remarketing, then confirms /run-live builds a genuine report
+    from them — never from the Workflow_19 fixture."""
+    rows = [
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P1", workflow="market_matching",
+            payload={
+                "submission_id": "SUB-P1",
+                "matches": [{"carrier_id": "CAR-IC", "carrier_name": "Ironclad", "score": 82.0}],
+                "excluded": [], "diligent_search": {
+                    "required": False, "on_file": 0, "compliant": True, "note": "n/a",
+                },
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P2", workflow="market_matching",
+            payload={
+                "submission_id": "SUB-P2", "matches": [], "excluded": [],
+                "diligent_search": {
+                    "required": False, "on_file": 0, "compliant": True, "note": "n/a",
+                },
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P1", workflow="package_assembly",
+            payload={
+                "package_id": "PKG-1", "submission_id": "SUB-P1", "carrier_id": "CAR-IC",
+                "carrier_name": "Ironclad", "status": "READY",
+                "cover_letter": {"body": "...", "citations": []},
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P1", workflow="package_assembly",
+            payload={
+                "package_id": "PKG-2", "submission_id": "SUB-P1", "carrier_id": "CAR-VT",
+                "carrier_name": "Vantage", "status": "READY",
+                "cover_letter": {"body": "...", "citations": []},
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P1", workflow="quote_comparison",
+            payload={
+                "submission_id": "SUB-P1",
+                "quotes": [
+                    {
+                        "quote_id": "Q-IC", "submission_id": "SUB-P1", "carrier_name": "Ironclad",
+                        "response_type": "QUOTE",
+                    },
+                    {
+                        "quote_id": "Q-VT", "submission_id": "SUB-P1", "carrier_name": "Vantage",
+                        "response_type": "DECLINATION",
+                    },
+                ],
+                "comparability_assessment": {"directly_comparable": True, "material_differences": []},
+                "output_mode": "SINGLE_RECOMMENDATION",
+                "recommendation": {"reasoning": {"summary": "..."}},
+                "selected_quote_id": "Q-IC",
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-P1", workflow="binder_issuance",
+            payload={
+                "bind_id": "BIND-1", "submission_id": "SUB-P1", "carrier_id": "CAR-IC",
+                "carrier_name": "Ironclad", "requested_bind_terms": {},
+                "carrier_confirmation": {"binder_number": "BINDER-123"},
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="RR-1", workflow="renewal_remarketing",
+            payload={
+                "renewal_review_id": "RR-1", "named_insured": "Some Account",
+                "is_comparison_stage": False,
+                "trigger_decision": {
+                    "level": "FULL_REMARKET",
+                    "reasoning": {"summary": "Adverse pricing vs. exposure change."},
+                },
+            },
+        ),
+    ]
+    es_session.add_all(rows)
+    await es_session.commit()
+
+    item = await run_pipeline_reporting_live(es_ctx, es_session)
+    payload = item.payload
+
+    stages = {s.stage: s for s in payload.funnel}
+    assert stages["Submissions Received"].count == 2
+    assert stages["Matched to Carrier"].count == 1
+    assert stages["Packages Assembled"].count == 1
+    assert stages["Quotes Received"].count == 1
+    assert stages["Compared & Selected"].count == 1
+    assert stages["Bound"].count == 1
+    assert payload.data_completeness.status == "COMPLETE"
+
+    carriers = {c.carrier_name: c for c in payload.carrier_performance}
+    assert carriers["Ironclad"].submissions_approached == 1
+    assert carriers["Ironclad"].quote_rate == 100.0
+    assert carriers["Ironclad"].overall_hit_rate == 100.0
+    assert carriers["Ironclad"].low_volume_flag is True  # 1 < the placeholder threshold
+    assert carriers["Vantage"].quote_rate == 0.0
+
+    outcome = payload.remarketing_value[0]
+    assert outcome.account == "Some Account"
+    # No workflow anywhere records a real carrier-switch decision yet, so a
+    # remarket that was triggered but never confirmed switched honestly
+    # produces confirmation_value, never a guessed savings figure.
+    assert outcome.outcome_type == "confirmation_value"
+    assert outcome.savings_amount is None

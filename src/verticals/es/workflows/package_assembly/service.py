@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.common.dtos import (
     Ctx,
     Decision,
@@ -34,6 +36,10 @@ from core.common.enums import DecisionOutcome
 from core.extraction.service import ExtractionService
 from core.llm.service import LLMService
 from verticals.es.workflows.package_assembly.assembly import PackageResult, assemble_package
+from verticals.es.workflows.package_assembly.live_ingestion import (
+    build_live_carrier_view,
+    live_completeness_check,
+)
 from verticals.es.workflows.package_assembly.scenario_loader import carrier_view, load_scenario
 from verticals.es.workflows.package_assembly.schema import (
     BlockingItemOut,
@@ -77,6 +83,7 @@ class PackageAssemblyPipeline:
         self._mm_workflow_n = market_matching_workflow_n
         self._carrier_view: dict[str, Any] | None = None
         self._result: PackageResult | None = None
+        self._is_live = False
 
     async def ingest(self, ctx: Ctx, inp: WorkflowInput) -> RawBundle:
         """Loads the scenario's market_matching_output.json + resolves the
@@ -112,7 +119,11 @@ class PackageAssemblyPipeline:
 
     async def decide(self, ctx: Ctx, data: ExtractedModel) -> Decision:
         assert self._carrier_view is not None, "ingest() must run before decide()"
-        result = assemble_package(self._carrier_view, data)
+        result = (
+            assemble_package(self._carrier_view, data, document_check_fn=live_completeness_check)
+            if self._is_live
+            else assemble_package(self._carrier_view, data)
+        )
         self._result = result
 
         blocking_summary = "; ".join(f"{b.item} ({b.reason})" for b in result.blocking_items)
@@ -154,7 +165,8 @@ class PackageAssemblyPipeline:
         for key, value in (view.get("loss_history_summary") or {}).items():
             facts.append(ExtractedValue(name=f"loss_history.{key}", value=value))
         for gap in result.gap_items_disclosed:
-            facts.append(ExtractedValue(name="package.gap_item", value=gap.item))
+            if gap.cover_letter_acknowledgment:
+                facts.append(ExtractedValue(name="package.gap_item", value=gap.item))
         for blocking in result.blocking_items:
             value = f"{blocking.item}: {blocking.reason}"
             facts.append(ExtractedValue(name="package.blocking_item", value=value))
@@ -239,6 +251,24 @@ class PackageAssemblyPipeline:
         once each — never reuses one instance across carriers, since
         per-run state is stashed on `self`."""
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live(
+        self, ctx: Ctx, session: AsyncSession, market_matching_review_item_id: str, carrier_id: str
+    ) -> OutputPackage:
+        """Additive entry point, alongside ``run()``'s fixture-scenario path
+        above — assembles a real package for one carrier from an ACTUAL
+        Market Matching review item instead of a Workflow_11 fixture. See
+        ``live_ingestion.py`` for the real data sources and the coarser,
+        type-only document completeness check this path deliberately uses."""
+        self._is_live = True
+        self._carrier_view = await build_live_carrier_view(
+            session, ctx, market_matching_review_item_id, carrier_id
+        )
+        raw = RawBundle(submission_id=self._carrier_view.get("submission_id"))
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

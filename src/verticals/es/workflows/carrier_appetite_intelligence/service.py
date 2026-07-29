@@ -24,6 +24,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.common.dtos import (
     Ctx,
     Decision,
@@ -42,6 +44,9 @@ from verticals.es.workflows.carrier_appetite_intelligence.consistency_engine imp
     PatternResult,
     compute_metadata_refresh,
     score_pattern,
+)
+from verticals.es.workflows.carrier_appetite_intelligence.live_signal_builder import (
+    build_live_signal_log,
 )
 from verticals.es.workflows.carrier_appetite_intelligence.scenario_loader import load_scenario
 from verticals.es.workflows.carrier_appetite_intelligence.schema import (
@@ -236,6 +241,31 @@ class CarrierAppetiteIntelligencePipeline:
 
     async def run(self, ctx: Ctx, inp: WorkflowInput) -> OutputPackage:
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, session: AsyncSession, carrier_name: str) -> OutputPackage:
+        """Additive live-aggregation entry point, alongside ``run()``'s
+        fixture-scenario path above — evaluates one carrier's REAL
+        declination-consistency signals, already logged by Quote
+        Comparison, instead of a ``signal_log.json`` fixture. See
+        ``live_signal_builder.py`` for the exact mapping and its honest
+        limitations (no class_code, approximate date, name-keyed join)."""
+        context = await build_live_signal_log(session, ctx, carrier_name)
+        self._carrier_id = context["carrier_id"]
+        self._carrier_name = context["carrier_name"]
+        self._class_code = context["class_code"]
+
+        panel = load_carrier_panel(_CARRIER_PANEL_WORKFLOW_N)
+        real_profile = next((p for p in panel if p.carrier_id == self._carrier_id), None)
+        self._current_confidence = (
+            real_profile.appetite_confidence if real_profile is not None else "medium"
+        )
+
+        self._result = score_pattern(context["observed_outcomes"])
+        raw = RawBundle(submission_id=f"{self._carrier_id}:{self._class_code}")
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

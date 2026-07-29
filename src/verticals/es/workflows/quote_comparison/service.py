@@ -32,6 +32,7 @@ from core.common.dtos import (
     WorkflowInput,
 )
 from core.common.enums import DecisionOutcome, DocumentKind
+from core.config import get_settings
 from core.llm.service import LLMService
 from verticals.es.decision_core.carrier_profiles import CarrierProfile, load_carrier_panel
 from verticals.es.workflows.quote_comparison.comparison_engine import (
@@ -139,7 +140,14 @@ class QuoteComparisonPipeline:
     async def decide(self, ctx: Ctx, data: ExtractedModel) -> Decision:
         assert self._parsed is not None and self._as_of is not None, "ingest()/extract() first"
         self._quotes = make_quotes(self._parsed)
-        self._result = recommend(self._quotes, self._as_of, VALIDITY_URGENCY_THRESHOLD_DAYS)
+        settings = get_settings()
+        self._result = recommend(
+            self._quotes,
+            self._as_of,
+            VALIDITY_URGENCY_THRESHOLD_DAYS,
+            price_weight=settings.quote_rank_price_weight,
+            subjectivity_penalty=settings.quote_rank_subjectivity_penalty,
+        )
 
         viable = [q for q in self._quotes if q.parsed.response_type == "QUOTE"]
         outcome = DecisionOutcome.PROCEED if viable else DecisionOutcome.DECLINE

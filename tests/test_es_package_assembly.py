@@ -26,10 +26,23 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import DecisionOutcome, ReviewAction, ReviewStatus, Role, Vertical
 from core.config import get_settings
+from core.documents import LocalDocumentStore
 from core.extraction import DefaultExtractionService
+from core.ingestion import MockConnectorService
 from core.llm import build_llm_service
+from core.models import OutputPackage as OutputPackageRow
+from core.models import ReviewItem as ReviewItemRow
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
+from core.rules_engine import DefaultRulesEngine
+from verticals.es.workflows.market_matching.service import (
+    DEFAULT_WORKFLOW_N as MM_WORKFLOW_N,
+)
+from verticals.es.workflows.market_matching.service import MarketMatchingPipeline
+from verticals.es.workflows.package_assembly.router import (
+    RunFromMarketMatchingRequest,
+    run_package_assembly_from_market_matching,
+)
 from verticals.es.workflows.package_assembly.service import PackageAssemblyPipeline
 
 pytestmark = pytest.mark.skipif(
@@ -191,3 +204,104 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "package_assembly"})
     assert len(entries) == 1
+
+
+async def test_run_from_market_matching_uses_real_carrier_and_document_data(
+    es_ctx, es_session
+) -> None:
+    """Market Matching -> Package Assembly (Phase 2 connectivity): a real
+    package for CAR-03 (Ironclad) built from an ACTUAL Market Matching item
+    for submission_01, not the Workflow_11 fixture. Confirms real
+    carrier_id/carrier_name/required_documents (from the real Carrier
+    Appetite Profile panel) and real document completeness (submission_01's
+    actually-persisted acord/loss_run/financials satisfy all of Ironclad's
+    real requirements)."""
+    mm_pipeline = MarketMatchingPipeline(
+        session=es_session,
+        connector=MockConnectorService(workflow_n=MM_WORKFLOW_N),
+        extraction=DefaultExtractionService(),
+        rules_engine=DefaultRulesEngine(),
+        llm=build_llm_service(),
+        documents=LocalDocumentStore(),
+        workflow_n=MM_WORKFLOW_N,
+    )
+    mm_output = await mm_pipeline.run(
+        es_ctx, WorkflowInput(submission_id="submission_01", source_ref="submission_01")
+    )
+    mm_item = await DefaultReviewQueueService().enqueue(
+        es_session, es_ctx, mm_output, "market_matching"
+    )
+
+    items = await run_package_assembly_from_market_matching(
+        RunFromMarketMatchingRequest(market_matching_review_item_id=mm_item.id, carrier_id="CAR-03"),
+        es_ctx, es_session,
+    )
+    assert len(items) == 1
+    payload = items[0].payload
+    assert payload.carrier_id == "CAR-03"
+    assert payload.carrier_name == "Ironclad Casualty Solutions"
+
+    checklist = {d.document_type: d.included for d in payload.document_checklist}
+    assert checklist == {
+        "ACORD 125": True, "ACORD 126": True,
+        "3-year loss run minimum": True, "current financials": True,
+    }
+    # No real Diligent Search record exists yet, and Market Matching's own
+    # signal says required=True/not yet compliant for this submission — a
+    # real, correct blocking condition, not a bug in the live path.
+    assert any("Diligent search" in b.item for b in payload.blocking_items)
+
+
+async def test_run_from_market_matching_reflects_real_diligent_search_record(
+    es_ctx, es_session
+) -> None:
+    """PA-06 (Phase 2 connectivity): once a real Diligent Search record with
+    a SUFFICIENT state exists for the submission, the live Package Assembly
+    path reflects it as present — no more diligent-search blocking item."""
+    mm_pipeline = MarketMatchingPipeline(
+        session=es_session,
+        connector=MockConnectorService(workflow_n=MM_WORKFLOW_N),
+        extraction=DefaultExtractionService(),
+        rules_engine=DefaultRulesEngine(),
+        llm=build_llm_service(),
+        documents=LocalDocumentStore(),
+        workflow_n=MM_WORKFLOW_N,
+    )
+    mm_output = await mm_pipeline.run(
+        es_ctx, WorkflowInput(submission_id="submission_01", source_ref="submission_01")
+    )
+    mm_item = await DefaultReviewQueueService().enqueue(
+        es_session, es_ctx, mm_output, "market_matching"
+    )
+
+    ds_pkg = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="submission_01",
+        workflow="diligent_search",
+        payload={
+            "compliance_record_id": "ds-1",
+            "submission_id": "submission_01",
+            "state_determinations": [
+                {
+                    "state": "FL", "requirement_status": "REQUIRED",
+                    "sufficiency_status": "SUFFICIENT",
+                }
+            ],
+            "overall_status": "COMPLETE",
+        },
+    )
+    es_session.add(ds_pkg)
+    await es_session.flush()
+    es_session.add(ReviewItemRow(
+        tenant_id=es_ctx.tenant_id, submission_id="submission_01",
+        output_package_id=ds_pkg.id, workflow="diligent_search", status=ReviewStatus.PENDING,
+    ))
+    await es_session.commit()
+
+    items = await run_package_assembly_from_market_matching(
+        RunFromMarketMatchingRequest(market_matching_review_item_id=mm_item.id, carrier_id="CAR-03"),
+        es_ctx, es_session,
+    )
+    payload = items[0].payload
+    assert payload.diligent_search_attached is True
+    assert not any("Diligent search" in b.item for b in payload.blocking_items)

@@ -16,7 +16,7 @@ binary implementation would misclassify in either direction.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 # Placeholders (per this project's convention — validate with real brokers).
@@ -85,6 +85,9 @@ class RemarketingHistoryResult:
 class TriggerDecision:
     level: str  # NO_REMARKET | LIGHT_REMARKET_CHECK | FULL_REMARKET | URGENT_REMARKET
     reasoning: str
+    # FR-9: which signal(s) drove this decision — (claim, source field path)
+    # pairs naming the actual computed value used, never an invented fact.
+    citations: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,16 @@ def decide_trigger(
                 "of pricing or exposure, treated with the same urgency as a timing-critical "
                 "alert elsewhere in this vertical."
             ),
+            citations=[
+                (
+                    "Incumbent has not sent renewal terms despite broker follow-up",
+                    "incumbent_renewal_offer.received",
+                ),
+                (
+                    "Limited time remains before expiration",
+                    "incumbent_renewal_offer.days_before_expiration_at_check",
+                ),
+            ],
         )
 
     if history.suppress:
@@ -211,6 +224,7 @@ def decide_trigger(
                 f"This account's own remarketing history shows no demonstrated value: "
                 f"{history.detail}"
             ),
+            citations=[(history.detail or "No demonstrated remarketing value", "remarketing_history")],
         )
 
     disproportionate = False
@@ -234,6 +248,17 @@ def decide_trigger(
                 f"activity ({loss.new_claims_count} new claim(s)) — worth confirming no better "
                 f"alternative exists, even if the pricing itself is likely justified."
             ),
+            citations=[
+                (
+                    f"Premium change of {incumbent.pct_premium_change}%",
+                    "incumbent_renewal_offer.pct_premium_change",
+                ),
+                (f"Exposure change of {exposure.pct_change}%", "exposure_change.pct_change"),
+                (
+                    f"Loss trend: {loss.trend} ({loss.new_claims_count} new claim(s))",
+                    "expiring_term_loss_activity",
+                ),
+            ],
         )
 
     light_check_warranted = (exposure.material and exposure.already_endorsed) or (
@@ -247,6 +272,14 @@ def decide_trigger(
                 "the account's larger size band makes a lightweight comparison check worth "
                 "doing — distinct in effort from a full remarket campaign."
             ),
+            citations=[
+                (
+                    f"Exposure change of {exposure.pct_change}%"
+                    + (" (already endorsed)" if exposure.already_endorsed else ""),
+                    "exposure_change",
+                ),
+                (f"Loss trend: {loss.trend}", "expiring_term_loss_activity"),
+            ],
         )
 
     return TriggerDecision(
@@ -255,6 +288,10 @@ def decide_trigger(
             "No material adverse or unexplained change, incumbent responsive, and renewal "
             "terms reasonable relative to exposure change."
         ),
+        citations=[
+            ("Incumbent renewal terms received and reasonable", "incumbent_renewal_offer"),
+            (f"Exposure change of {exposure.pct_change}% (not material)", "exposure_change.pct_change"),
+        ],
     )
 
 

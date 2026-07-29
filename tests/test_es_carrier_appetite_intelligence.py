@@ -23,12 +23,14 @@ from core.common.dtos import Ctx, WorkflowInput
 from core.common.enums import DecisionOutcome, Role, Vertical
 from core.config import get_settings
 from core.llm import build_llm_service
+from core.models import OutputPackage as OutputPackageRow
 from core.models import Tenant
 from verticals.es.workflows.carrier_appetite_intelligence.router import (
     RunRequest,
     approve,
     dismiss,
     run_carrier_appetite_intelligence,
+    run_carrier_appetite_intelligence_live,
 )
 from verticals.es.workflows.carrier_appetite_intelligence.service import (
     CarrierAppetiteIntelligencePipeline,
@@ -139,3 +141,83 @@ async def test_run_and_dismiss(es_ctx, es_session) -> None:
     item = await run_carrier_appetite_intelligence(body, es_ctx, es_session)
     dismissed = await dismiss(item.id, es_ctx, es_session)
     assert dismissed.payload.status == "DISMISSED"
+
+
+async def test_run_live_aggregates_real_quote_comparison_declinations(es_ctx, es_session) -> None:
+    """The additive live-aggregation path (CI-01's real cross-workflow
+    read): inserts real quote_comparison OutputPackage rows directly (same
+    shape service.py's real pipeline produces), then confirms /run-live
+    builds a genuine evaluation from them — never from the Workflow_18
+    fixture. Also proves an "unable_to_determine" declination is excluded
+    entirely, never guessed as consistent or inconsistent."""
+    quotes_row_1 = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="SUB-LIVE-1",
+        workflow="quote_comparison",
+        payload={
+            "submission_id": "SUB-LIVE-1",
+            "quotes": [
+                {
+                    "quote_id": "Q-1",
+                    "submission_id": "SUB-LIVE-1",
+                    "carrier_name": "Live Test Carrier",
+                    "response_type": "DECLINATION",
+                    "declination_reason": "carrier no longer writes this class",
+                    "declination_appetite_consistency": "inconsistent",
+                },
+                {
+                    "quote_id": "Q-2",
+                    "submission_id": "SUB-LIVE-1",
+                    "carrier_name": "Live Test Carrier",
+                    "response_type": "QUOTE",
+                },
+            ],
+        },
+    )
+    quotes_row_2 = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="SUB-LIVE-2",
+        workflow="quote_comparison",
+        payload={
+            "submission_id": "SUB-LIVE-2",
+            "quotes": [
+                {
+                    "quote_id": "Q-3",
+                    "submission_id": "SUB-LIVE-2",
+                    "carrier_name": "Live Test Carrier",
+                    "response_type": "DECLINATION",
+                    "declination_reason": "appetite has changed for this class",
+                    "declination_appetite_consistency": "inconsistent",
+                },
+                {
+                    "quote_id": "Q-4",
+                    "submission_id": "SUB-LIVE-2",
+                    "carrier_name": "Live Test Carrier",
+                    "response_type": "DECLINATION",
+                    "declination_reason": "severity too high for this specific account",
+                    "declination_appetite_consistency": "consistent",
+                },
+                {
+                    "quote_id": "Q-5",
+                    "submission_id": "SUB-LIVE-2",
+                    "carrier_name": "Live Test Carrier",
+                    "response_type": "DECLINATION",
+                    "declination_reason": None,
+                    "declination_appetite_consistency": "unable_to_determine",
+                },
+            ],
+        },
+    )
+    es_session.add_all([quotes_row_1, quotes_row_2])
+    await es_session.commit()
+
+    items = await run_carrier_appetite_intelligence_live(es_ctx, es_session)
+
+    assert len(items) == 1
+    payload = items[0].payload
+    assert payload.carrier_name == "Live Test Carrier"
+    # 3 classifiable declinations feed the engine — the 4th ("unable_to_determine")
+    # is excluded entirely, never defaulted to consistent/inconsistent.
+    assert len(payload.evidence) == 3
+    assert payload.pattern_type == "GENUINE_INCONSISTENCY"
+    assert payload.status == "PENDING_REVIEW"

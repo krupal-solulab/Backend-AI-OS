@@ -34,6 +34,8 @@ APPETITE_TOUCHING_TYPES = {"limit_increase", "add_operations_class", "add_locati
 # Placeholders (per this project's convention — validate with real brokers).
 HEADCOUNT_MATERIALITY_PCT_THRESHOLD = 50.0
 HEADCOUNT_MATERIALITY_ABS_PREMIUM_THRESHOLD = 10_000.0
+# EP-06/FR-10: "very close to expiration" placeholder threshold.
+UNUSUAL_TIMING_NEAR_EXPIRATION_DAYS = 30
 
 _HEADCOUNT_RE = re.compile(r"from\s+(\d+)\s+to\s+(\d+)", re.IGNORECASE)
 _STATE_ABBR_RE = re.compile(r"\b([A-Z]{2})\b")
@@ -61,6 +63,7 @@ class ProrationInputs:
     days_elapsed: int
     days_remaining: int
     term_total_days: int
+    unusual_timing_flag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,28 @@ def appetite_recheck(
     )
 
 
+def _unusual_timing_flag(days_elapsed: int, days_remaining: int) -> str | None:
+    """EP-06/FR-10: flag unusual timing on the requested effective date —
+    never an independent premium calculation, just a surfaced warning."""
+    if days_elapsed < 0:
+        return (
+            "Requested effective date falls before the policy's own effective date — "
+            "out of term, confirm this is correct."
+        )
+    if days_remaining < 0:
+        return (
+            "Requested effective date falls after the policy's expiration — the policy "
+            "would need to be renewed first, not endorsed."
+        )
+    if days_remaining < UNUSUAL_TIMING_NEAR_EXPIRATION_DAYS:
+        return (
+            f"Only {days_remaining} day(s) remain in the current term — an endorsement "
+            "may not be the appropriate mechanism this close to expiration; consider "
+            "handling at renewal instead."
+        )
+    return None
+
+
 def proration_inputs(
     effective_date: date, expiration_date: date, reference_date: date
 ) -> ProrationInputs:
@@ -213,8 +238,12 @@ def proration_inputs(
     calculated premium figure (that stays the carrier's determination)."""
     term_total = (expiration_date - effective_date).days
     elapsed = (reference_date - effective_date).days
+    remaining = term_total - elapsed
     return ProrationInputs(
-        days_elapsed=elapsed, days_remaining=term_total - elapsed, term_total_days=term_total
+        days_elapsed=elapsed,
+        days_remaining=remaining,
+        term_total_days=term_total,
+        unusual_timing_flag=_unusual_timing_flag(elapsed, remaining),
     )
 
 

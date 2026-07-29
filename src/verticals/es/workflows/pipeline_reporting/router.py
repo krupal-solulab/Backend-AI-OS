@@ -80,6 +80,24 @@ async def run_pipeline_reporting(
     )
 
 
+@router.post("/run-live", status_code=status.HTTP_201_CREATED)
+async def run_pipeline_reporting_live(ctx: CtxDep, session: SessionDep) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: builds one report from real
+    cross-workflow ``OutputPackage`` rows for this tenant (Market Matching,
+    Package Assembly, Quote Comparison, Binder Issuance, Renewal
+    Remarketing) instead of the Workflow_19 fixture. See
+    ``live_aggregator.py``."""
+    pipeline = _pipeline()
+    output = await pipeline.run_live(ctx, session)
+
+    review_queue = DefaultReviewQueueService()
+    item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=PipelineReportPayload(**output.payload),
+    )
+
+
 @router.get("")
 async def list_pipeline_reporting(ctx: CtxDep, session: SessionDep) -> list[ReviewItemOut]:
     rows = (

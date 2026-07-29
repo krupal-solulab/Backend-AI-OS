@@ -16,6 +16,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from sqlmodel import col, select
+
 import core.models  # noqa: F401  (registers tables)
 from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, RawBundle, RawDocument, WorkflowInput
@@ -25,9 +27,11 @@ from core.documents import LocalDocumentStore
 from core.extraction import DefaultExtractionService
 from core.ingestion import MockConnectorService
 from core.llm import build_llm_service
+from core.models import ReviewItem as ReviewItemRow
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
+from verticals.es.workflows.market_matching.router import RunRequest, run_market_matching
 from verticals.es.workflows.market_matching.service import (
     DEFAULT_WORKFLOW_N,
     MarketMatchingPipeline,
@@ -212,3 +216,33 @@ async def test_full_pipeline_draft_review_and_audit(es_session, es_ctx) -> None:
     entries = await audit.query(es_session, es_ctx, {"workflow": "market_matching"})
     assert len(entries) == 1
     assert entries[0].actor == "ai"
+
+
+async def test_zero_match_seeds_diligent_search_stub(es_session, es_ctx) -> None:
+    """MM-07 -> Diligent Search (Phase 2 connectivity): a real zero-match
+    result whose diligent_search flag is required must seed a real, linked
+    Diligent Search review item stub — additive, via /run's router-level
+    hook, not a fake determination. Re-running the same submission must
+    never create a second stub."""
+    await run_market_matching(RunRequest(submission_ref="submission_06"), es_ctx, es_session)
+
+    ds_items = (
+        await es_session.execute(
+            select(ReviewItemRow).where(
+                col(ReviewItemRow.tenant_id) == es_ctx.tenant_id,
+                col(ReviewItemRow.workflow) == "diligent_search",
+            )
+        )
+    ).scalars().all()
+    assert len(ds_items) == 1
+
+    await run_market_matching(RunRequest(submission_ref="submission_06"), es_ctx, es_session)
+    ds_items_again = (
+        await es_session.execute(
+            select(ReviewItemRow).where(
+                col(ReviewItemRow.tenant_id) == es_ctx.tenant_id,
+                col(ReviewItemRow.workflow) == "diligent_search",
+            )
+        )
+    ).scalars().all()
+    assert len(ds_items_again) == 1

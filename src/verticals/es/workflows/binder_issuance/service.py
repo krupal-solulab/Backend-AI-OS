@@ -416,3 +416,23 @@ class BinderIssuancePipeline:
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)
         return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, broker_bind_instruction: dict[str, Any]) -> OutputPackage:
+        """Additive entry point, alongside ``run()``'s fixture-scenario path
+        above — starts a real pre-bind pass from an already-built
+        ``broker_bind_instruction`` dict (see
+        ``live_ingestion.build_broker_bind_instruction_from_quote``) instead
+        of loading a Workflow_14 fixture. No carrier confirmation/issued
+        policy text exists yet at this stage, so this is always a fresh
+        pre-bind READY/BLOCKED evaluation, same as a scenario's first pass."""
+        self._bundle = ScenarioBundle(
+            scenario_ref="live", broker_bind_instruction=broker_bind_instruction
+        )
+        self._submission_id = broker_bind_instruction.get("submission_id")
+        self._as_of = datetime.now(UTC).date()
+
+        raw = RawBundle(submission_id=self._submission_id, documents=[])
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)

@@ -12,6 +12,7 @@ shared engine cleanly, so it's deliberately unused here.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -207,12 +208,46 @@ def _try_direct_extract(
     return None, None
 
 
+def _form_version_disclosure_gaps(carrier_requirements: dict[str, Any]) -> list[GapItem]:
+    """PA-05: package documents must conform to each carrier's stated
+    format/version preferences. No sample fixture populates
+    `preferred_form_versions`, and — more fundamentally — extraction never
+    captures a document's version/edition at all (only its type, e.g.
+    "ACORD 125"), so a real pass/fail compliance verdict can't be computed
+    without fabricating data on one side or the other. Honest behavior: when
+    a carrier DOES declare a preferred version, disclose it as an explicit
+    open question via the existing gap mechanism (never silently ignored,
+    never asserted as compliant/non-compliant) so a broker knows to confirm
+    it manually before sending."""
+    preferred_versions: dict[str, str] = carrier_requirements.get("preferred_form_versions") or {}
+    return [
+        GapItem(
+            item=f"{form_key}: carrier prefers {preferred_version}",
+            cover_letter_acknowledgment=False,
+        )
+        for form_key, preferred_version in preferred_versions.items()
+    ]
+
+
 def assemble_package(
-    carrier_view: dict[str, Any], submission_extracted: ExtractedModel
+    carrier_view: dict[str, Any],
+    submission_extracted: ExtractedModel,
+    *,
+    document_check_fn: Callable[
+        [str, list[str], list[dict[str, Any]]], tuple[bool, str | None]
+    ] = check_document,
 ) -> PackageResult:
     """The PA-01..PA-06 engine for ONE carrier. PA-07 (precedence ordering)
     is architectural, not exercised here — see the module's docstring and
-    Validation_Rules_Test_Dataset.md."""
+    Validation_Rules_Test_Dataset.md.
+
+    ``document_check_fn`` defaults to the fixture path's exact-string/
+    year-aware ``check_document`` above — every existing call site keeps
+    byte-identical behavior. The real Market Matching -> Package Assembly
+    live-ingestion path (``live_ingestion.py``) passes its own, coarser
+    type-only completeness check instead, since real document extraction
+    can't confirm an exact form edition or a loss run's covered years — see
+    that module's docstring for exactly why."""
     carrier_id = carrier_view["carrier_id"]
     carrier_requirements = carrier_view.get("carrier_requirements", {})
     requirements: list[str] = carrier_requirements.get("required_documents", [])
@@ -221,10 +256,10 @@ def assemble_package(
 
     checklist: list[DocChecklistItem] = []
     blocking: list[BlockingItem] = []
-    gaps: list[GapItem] = []
+    gaps: list[GapItem] = _form_version_disclosure_gaps(carrier_requirements)
 
     for requirement in requirements:
-        present, note = check_document(requirement, available, missing_info)
+        present, note = document_check_fn(requirement, available, missing_info)
         checklist.append(
             DocChecklistItem(
                 document_type=requirement, included=present, source=requirement if present else None

@@ -32,6 +32,9 @@ from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
 from verticals.es.agent_communication_hooks import fire_binder_issuance_result
 from verticals.es.workflows.binder_issuance.coordination_engine import recompute_live_state
+from verticals.es.workflows.binder_issuance.live_ingestion import (
+    build_broker_bind_instruction_from_quote,
+)
 from verticals.es.workflows.binder_issuance.schema import BindCoordinationPayload
 from verticals.es.workflows.binder_issuance.service import (
     DEFAULT_WORKFLOW_N,
@@ -55,6 +58,10 @@ def _pipeline() -> BinderIssuancePipeline:
 class RunRequest(BaseModel):
     scenario_ref: str
     as_of: str | None = None  # ISO date override — fixture/test determinism only
+
+
+class RunFromQuoteRequest(BaseModel):
+    quote_comparison_item_id: str
 
 
 class ResolveDiscrepancyRequest(BaseModel):
@@ -100,6 +107,30 @@ async def run_binder_issuance(body: RunRequest, ctx: CtxDep, session: SessionDep
         source_ref=body.scenario_ref, params={"as_of": body.as_of} if body.as_of else {}
     )
     output = await pipeline.run(ctx, inp)
+
+    review_queue = DefaultReviewQueueService()
+    item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+
+    await fire_binder_issuance_result(
+        session, ctx, submission_id=item.submission_id, payload=output.payload
+    )
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=BindCoordinationPayload(**output.payload),
+    )
+
+
+@router.post("/run-from-quote-comparison", status_code=status.HTTP_201_CREATED)
+async def run_binder_issuance_from_quote(
+    body: RunFromQuoteRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: starts a real pre-bind pass from
+    an actual, already-selected Quote Comparison item's real terms, instead
+    of a Workflow_14 fixture. See ``live_ingestion.py``."""
+    instruction = await build_broker_bind_instruction_from_quote(session, ctx, body.quote_comparison_item_id)
+
+    pipeline = _pipeline()
+    output = await pipeline.run_live(ctx, instruction)
 
     review_queue = DefaultReviewQueueService()
     item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)

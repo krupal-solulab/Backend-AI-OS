@@ -11,6 +11,8 @@ verticals/es/workflows/quote_comparison/eval_test.py for why.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -24,7 +26,12 @@ from core.llm import build_llm_service
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
 from verticals.es.workflows.agent_communication.router import list_agent_communication
-from verticals.es.workflows.quote_comparison.comparison_engine import recompute_urgency_from_payload
+from verticals.es.workflows.quote_comparison.comparison_engine import (
+    Quote,
+    recommend,
+    recompute_urgency_from_payload,
+)
+from verticals.es.workflows.quote_comparison.quote_parser import ParsedResponse, Subjectivity
 from verticals.es.workflows.quote_comparison.router import (
     RunRequest,
     run_quote_comparison,
@@ -222,6 +229,46 @@ async def test_multi_option_does_not_autofire_before_broker_selects(es_ctx, es_s
     await select_quote(item.id, one_quote_id, es_ctx, es_session)
     after_select = await list_agent_communication(es_ctx, es_session)
     assert len(after_select) == 1
+
+
+def test_qc04_subjectivity_penalty_can_flip_ranking() -> None:
+    """QC-04/FR-18: ranking must be genuinely configurable, not a hardcoded
+    price-only default. With default weights (price_weight=1.0,
+    subjectivity_penalty=0.0) the cheaper-but-riskier quote wins, exactly
+    reproducing the original pure-premium behavior every scenario test above
+    still relies on. A large enough subjectivity_penalty must be able to flip
+    that ranking — proving the mechanism itself works, on synthetic quotes
+    kept entirely separate from the real scenario fixtures."""
+    cheap_but_risky = Quote(
+        quote_id="q-cheap",
+        parsed=ParsedResponse(
+            filename="synthetic_cheap.txt", carrier_name="Cheap Carrier",
+            named_insured="Synthetic Insured", response_date=None, response_type="QUOTE",
+            premium=100_000.0,
+            subjectivities=[
+                Subjectivity(
+                    description="4-year loss run required within 10 days",
+                    materiality="material", is_dependency=False,
+                )
+            ],
+        ),
+    )
+    pricier_but_clean = Quote(
+        quote_id="q-clean",
+        parsed=ParsedResponse(
+            filename="synthetic_clean.txt", carrier_name="Clean Carrier",
+            named_insured="Synthetic Insured", response_date=None, response_type="QUOTE",
+            premium=110_000.0,
+        ),
+    )
+    quotes = [cheap_but_risky, pricier_but_clean]
+    as_of = date(2027, 1, 1)
+
+    default_result = recommend(quotes, as_of)
+    assert default_result.primary_quote_id == "q-cheap"
+
+    weighted_result = recommend(quotes, as_of, price_weight=1.0, subjectivity_penalty=20_000.0)
+    assert weighted_result.primary_quote_id == "q-clean"
 
 
 async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
