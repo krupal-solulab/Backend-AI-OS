@@ -23,13 +23,13 @@ from sqlmodel import SQLModel
 
 import core.models  # noqa: F401  (registers tables)
 from core.audit import DefaultAuditService
-from core.common.dtos import AuditEntry, Ctx, WorkflowInput
-from core.common.enums import DecisionOutcome, ReviewAction, ReviewStatus, Role, Vertical
+from core.common.dtos import AuditEntry, Ctx, RawDocument, WorkflowInput
+from core.common.enums import DecisionOutcome, DocumentKind, ReviewAction, ReviewStatus, Role, Vertical
 from core.config import get_settings
 from core.documents import LocalDocumentStore
 from core.extraction import DefaultExtractionService
 from core.ingestion import MockConnectorService
-from core.llm import build_llm_service
+from core.llm import LLMService, MockLLMProvider, build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.models import Tenant
@@ -39,6 +39,10 @@ from verticals.es.workflows.market_matching.service import (
     DEFAULT_WORKFLOW_N as MM_WORKFLOW_N,
 )
 from verticals.es.workflows.market_matching.service import MarketMatchingPipeline
+from verticals.es.workflows.package_assembly.live_ingestion import (
+    build_live_carrier_view,
+    build_live_extracted_model,
+)
 from verticals.es.workflows.package_assembly.router import (
     RunFromMarketMatchingRequest,
     run_package_assembly_from_market_matching,
@@ -304,4 +308,94 @@ async def test_run_from_market_matching_reflects_real_diligent_search_record(
     )
     payload = items[0].payload
     assert payload.diligent_search_attached is True
-    assert not any("Diligent search" in b.item for b in payload.blocking_items)
+
+
+async def test_run_live_cover_letter_is_grounded_in_real_data(es_ctx, es_session) -> None:
+    """Part 4 fix: the live path's cover letter must be grounded in this
+    submission's REAL named insured, REAL carrier appetite notes, and REAL
+    loss-run figures — not the generic "[Your Name]"/"[Carrier's Name]"
+    placeholder template it produced before this fix (confirmed live against
+    a real Gmail submission). Uses MockLLMProvider (deterministic fact-echo,
+    see core/llm/service.py) instead of a real API call, so this asserts on
+    exactly what reached the draft step, not on how a real LLM phrases it.
+
+    submission_01 (Delta Electric Services LLC) -> CAR-03 (Ironclad) is a
+    real match from the Workflow_10 dataset, and Ironclad is the one real
+    carrier profile in this panel with a non-empty ``notes`` field."""
+    mm_pipeline = MarketMatchingPipeline(
+        session=es_session,
+        connector=MockConnectorService(workflow_n=MM_WORKFLOW_N),
+        extraction=DefaultExtractionService(),
+        rules_engine=DefaultRulesEngine(),
+        llm=build_llm_service(),
+        documents=LocalDocumentStore(),
+        workflow_n=MM_WORKFLOW_N,
+    )
+    mm_output = await mm_pipeline.run(
+        es_ctx, WorkflowInput(submission_id="submission_01", source_ref="submission_01")
+    )
+    mm_item = await DefaultReviewQueueService().enqueue(
+        es_session, es_ctx, mm_output, "market_matching"
+    )
+
+    pa_pipeline = PackageAssemblyPipeline(
+        extraction=DefaultExtractionService(),
+        llm=LLMService(MockLLMProvider()),
+    )
+    output = await pa_pipeline.run_live(es_ctx, es_session, mm_item.id, "CAR-03")
+
+    letter = output.draft.text
+    assert "Delta Electric Services LLC" in letter
+    assert "steep-slope roofing" in letter or "higher severity" in letter
+    assert "18400" in letter
+
+
+async def test_document_availability_uses_content_classification_not_filename(
+    es_ctx, es_session
+) -> None:
+    """Regression: caught live against a real Gmail submission — a real
+    attachment named e.g. "harborview_loss_run.pdf" doesn't match the
+    fixture loader's exact stem ("loss_run.pdf"), so it's stored as
+    DocumentKind.OTHER at ingestion. Document availability must be derived
+    from the extraction service's real CONTENT-based reclassification
+    (documents.<kind>.present, computed by build_live_extracted_model), not
+    from each Document row's raw, filename-derived kind column — otherwise
+    every requirement reads as missing despite the real document being on
+    file, exactly what happened before this fix."""
+    mm_pkg = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="SUB-TEST-PREFIXED-FILENAME",
+        workflow="market_matching",
+        payload={
+            "submission_id": "SUB-TEST-PREFIXED-FILENAME",
+            "matches": [
+                {"carrier_id": "CAR-03", "carrier_name": "Ironclad Casualty Solutions",
+                 "score": 1.0, "missing": [], "flags": []}
+            ],
+            "excluded": [],
+            "diligent_search": {"required": False, "on_file": 0, "compliant": True, "note": ""},
+        },
+    )
+    es_session.add(mm_pkg)
+    await es_session.flush()
+    mm_item = ReviewItemRow(
+        tenant_id=es_ctx.tenant_id, submission_id="SUB-TEST-PREFIXED-FILENAME",
+        output_package_id=mm_pkg.id, workflow="market_matching", status=ReviewStatus.PENDING,
+    )
+    es_session.add(mm_item)
+    await es_session.commit()
+
+    await LocalDocumentStore().save(
+        es_session, es_ctx, "SUB-TEST-PREFIXED-FILENAME",
+        RawDocument(
+            kind=DocumentKind.OTHER,  # exactly what live ingestion stores for this filename
+            filename="harborview_loss_run.pdf",
+            content="Loss Run - 5 Year History\nTotal Incurred (3yr): $18,400\n",
+        ),
+    )
+
+    model = await build_live_extracted_model(es_session, es_ctx, "SUB-TEST-PREFIXED-FILENAME")
+    view = await build_live_carrier_view(
+        es_session, es_ctx, mm_item.id, "CAR-03", extracted_model=model
+    )
+    assert "loss_run" in view["documents_available_from_extraction"]

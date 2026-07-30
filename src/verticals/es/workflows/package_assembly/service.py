@@ -38,7 +38,9 @@ from core.llm.service import LLMService
 from verticals.es.workflows.package_assembly.assembly import PackageResult, assemble_package
 from verticals.es.workflows.package_assembly.live_ingestion import (
     build_live_carrier_view,
+    build_live_extracted_model,
     live_completeness_check,
+    real_market_matching_payload,
 )
 from verticals.es.workflows.package_assembly.scenario_loader import carrier_view, load_scenario
 from verticals.es.workflows.package_assembly.schema import (
@@ -263,13 +265,23 @@ class PackageAssemblyPipeline:
         above — assembles a real package for one carrier from an ACTUAL
         Market Matching review item instead of a Workflow_11 fixture. See
         ``live_ingestion.py`` for the real data sources and the coarser,
-        type-only document completeness check this path deliberately uses."""
+        type-only document completeness check this path deliberately uses.
+
+        Deliberately does NOT call ``self.extract()`` — that method's
+        ``resolve_extracted_model()`` scans Workflow_10 FIXTURES for a
+        matching named insured (see its docstring) and would raise on any
+        real name. ``build_live_extracted_model()`` re-derives the real
+        ExtractedModel from this submission's actual persisted documents
+        instead."""
         self._is_live = True
-        self._carrier_view = await build_live_carrier_view(
-            session, ctx, market_matching_review_item_id, carrier_id
+        payload = await real_market_matching_payload(
+            session, ctx, market_matching_review_item_id
         )
-        raw = RawBundle(submission_id=self._carrier_view.get("submission_id"))
-        data = await self.extract(ctx, raw)
+        submission_id = payload.get("submission_id")
+        data = await build_live_extracted_model(session, ctx, submission_id)
+        self._carrier_view = await build_live_carrier_view(
+            session, ctx, market_matching_review_item_id, carrier_id, extracted_model=data
+        )
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)
         return await self.package(ctx, data, decision, draft)

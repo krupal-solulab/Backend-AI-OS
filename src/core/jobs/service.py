@@ -115,7 +115,7 @@ async def ingest_and_extract(
         )
         await JobRunService.mark(session, run_id, JobStatus.RUNNING)
         try:
-            connector = build_connector_service(workflow_n=workflow_n)
+            connector = build_connector_service(workflow_n=workflow_n, session=session)
             raw = await connector.to_raw_bundle(ctx, message_id)
             model = await DefaultExtractionService().extract(ctx, raw)
             result = {

@@ -246,3 +246,53 @@ async def test_zero_match_seeds_diligent_search_stub(es_session, es_ctx) -> None
         )
     ).scalars().all()
     assert len(ds_items_again) == 1
+
+
+class _FakeLiveConnector:
+    """Stands in for LiveNangoConnectorService in the /live-inbox router test —
+    the connector's own real behavior is proven separately in
+    tests/test_live_nango_connector.py; this only proves the router wires it up
+    and translates ConnectorNotConnectedError into a 428."""
+
+    def __init__(self, *, messages=None, raise_not_connected=False) -> None:
+        self._messages = messages or []
+        self._raise_not_connected = raise_not_connected
+
+    async def fetch_inbox(self, ctx, since_cursor=None):
+        if self._raise_not_connected:
+            from core.ingestion import ConnectorNotConnectedError
+
+            raise ConnectorNotConnectedError("google-mail")
+        return self._messages
+
+
+async def test_list_live_inbox_returns_real_messages(monkeypatch, es_ctx, es_session) -> None:
+    from core.ingestion import EmailMessage
+    from verticals.es.workflows.market_matching import router as mm_router
+
+    monkeypatch.setattr(
+        mm_router,
+        "build_connector_service",
+        lambda **kwargs: _FakeLiveConnector(
+            messages=[EmailMessage(id="msg-1", submission_ref="msg-1", subject="Real Submission", body="")]
+        ),
+    )
+    result = await mm_router.list_live_inbox(es_ctx, es_session)
+    assert len(result) == 1
+    assert result[0].id == "msg-1"
+    assert result[0].subject == "Real Submission"
+
+
+async def test_list_live_inbox_428_when_gmail_not_connected(monkeypatch, es_ctx, es_session) -> None:
+    from fastapi import HTTPException
+
+    from verticals.es.workflows.market_matching import router as mm_router
+
+    monkeypatch.setattr(
+        mm_router,
+        "build_connector_service",
+        lambda **kwargs: _FakeLiveConnector(raise_not_connected=True),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await mm_router.list_live_inbox(es_ctx, es_session)
+    assert exc_info.value.status_code == 428

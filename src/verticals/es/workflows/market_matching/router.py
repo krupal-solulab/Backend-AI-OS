@@ -17,7 +17,7 @@ from core.common.enums import ReviewAction
 from core.db import get_session
 from core.documents import LocalDocumentStore
 from core.extraction import DefaultExtractionService
-from core.ingestion.connectors import build_connector_service
+from core.ingestion.connectors import ConnectorNotConnectedError, build_connector_service
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
@@ -44,7 +44,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 def _pipeline(session: AsyncSession) -> MarketMatchingPipeline:
     return MarketMatchingPipeline(
         session=session,
-        connector=build_connector_service(workflow_n=DEFAULT_WORKFLOW_N),
+        connector=build_connector_service(workflow_n=DEFAULT_WORKFLOW_N, session=session),
         extraction=DefaultExtractionService(),
         rules_engine=DefaultRulesEngine(),
         llm=build_llm_service(),
@@ -68,6 +68,27 @@ class DocumentOut(BaseModel):
     filename: str
     kind: str
     content: str
+
+
+class LiveInboxMessageOut(BaseModel):
+    id: str
+    subject: str
+
+
+@router.get("/live-inbox")
+async def list_live_inbox(ctx: CtxDep, session: SessionDep) -> list[LiveInboxMessageOut]:
+    """Real Gmail messages (via the connected Nango integration) to pick from and
+    run through `/run` as a real ``submission_ref`` — additive alongside the
+    fixture-scenario path; requires Gmail connected + CONNECTORS_MODE=live."""
+    connector = build_connector_service(workflow_n=DEFAULT_WORKFLOW_N, session=session)
+    try:
+        messages = await connector.fetch_inbox(ctx)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    return [LiveInboxMessageOut(id=m.id, subject=m.subject) for m in messages]
 
 
 @router.post("/run", status_code=status.HTTP_201_CREATED)

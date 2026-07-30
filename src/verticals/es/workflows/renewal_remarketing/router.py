@@ -232,7 +232,9 @@ async def initiate_remarket(item_id: str, ctx: CtxDep, session: SessionDep) -> R
     if submission_ref:
         mm_pipeline = MarketMatchingPipeline(
             session=session,
-            connector=build_connector_service(workflow_n=_MARKET_MATCHING_WORKFLOW_N),
+            connector=build_connector_service(
+                workflow_n=_MARKET_MATCHING_WORKFLOW_N, session=session
+            ),
             extraction=DefaultExtractionService(),
             rules_engine=DefaultRulesEngine(),
             llm=build_llm_service(),

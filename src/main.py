@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.integrations.router import router as integrations_router
 from verticals.es.router import router as es_router
 from verticals.mga.router import router as mga_router
 
@@ -33,6 +34,8 @@ async def health() -> dict[str, int]:
     """Liveness probe. Phase marker confirms which milestone this build is at."""
     return {"phase": 0}
 
+
+core_router.include_router(integrations_router)
 
 app.include_router(core_router)
 app.include_router(mga_router)
