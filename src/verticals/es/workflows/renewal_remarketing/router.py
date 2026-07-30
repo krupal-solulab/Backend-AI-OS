@@ -42,6 +42,7 @@ from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
 from core.tenancy.dependencies import get_ctx
 from verticals.es.workflows.market_matching.service import MarketMatchingPipeline
+from verticals.es.workflows.renewal_remarketing.live_ingestion import discover_live_binds
 from verticals.es.workflows.renewal_remarketing.schema import RemarketDecisionPayload
 from verticals.es.workflows.renewal_remarketing.service import (
     DEFAULT_WORKFLOW_N,
@@ -97,6 +98,16 @@ class RunRequest(BaseModel):
     scenario_ref: str
 
 
+class RunLiveRequest(BaseModel):
+    bind_id: str
+
+
+class LiveBindOut(BaseModel):
+    bind_id: str
+    named_insured: str | None = None
+    carrier_name: str | None = None
+
+
 class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
@@ -135,6 +146,33 @@ async def run_renewal_remarketing(
 ) -> ReviewItemOut:
     pipeline = _pipeline()
     output = await pipeline.run(ctx, WorkflowInput(source_ref=body.scenario_ref))
+
+    review_queue = DefaultReviewQueueService()
+    item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=RemarketDecisionPayload(**output.payload),
+    )
+
+
+@router.get("/live-binds")
+async def list_live_binds(ctx: CtxDep, session: SessionDep) -> list[LiveBindOut]:
+    """Additive: every real Binder Issuance bind for this tenant, for the
+    "Check live renewal" picker — see live_ingestion.py."""
+    binds = await discover_live_binds(session, ctx)
+    return [LiveBindOut(**b) for b in binds]
+
+
+@router.post("/run-live", status_code=status.HTTP_201_CREATED)
+async def run_renewal_remarketing_live(
+    body: RunLiveRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: a real trigger-stage review built
+    from an ACTUAL Binder Issuance bind + real Endorsement Processing
+    history for it, instead of a Workflow_16 fixture. See
+    ``live_ingestion.py``."""
+    pipeline = _pipeline()
+    output = await pipeline.run_live(ctx, session, body.bind_id)
 
     review_queue = DefaultReviewQueueService()
     item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)

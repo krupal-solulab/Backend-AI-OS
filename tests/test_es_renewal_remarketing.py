@@ -20,14 +20,18 @@ from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import ReviewStatus, Role, Vertical
 from core.config import get_settings
 from core.llm import build_llm_service
+from core.models import OutputPackage as OutputPackageRow
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
 from verticals.es.workflows.renewal_remarketing.router import (
+    RunLiveRequest,
     RunRequest,
     accept_incumbent,
     escalate,
     initiate_remarket,
+    list_live_binds,
     run_renewal_remarketing,
+    run_renewal_remarketing_live,
 )
 from verticals.es.workflows.renewal_remarketing.service import RenewalRemarketingPipeline
 
@@ -184,3 +188,81 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "renewal_remarketing"})
     assert len(entries) == 1
+
+
+async def test_run_live_reflects_real_already_endorsed_exposure(es_ctx, es_session) -> None:
+    """FR-2 (Phase 3 connectivity): a real bind with a real, material
+    (UNDERWRITING_REVIEW_REQUIRED) endorsement on file must be flagged as
+    already-endorsed via a genuine cross-reference — never a fabricated
+    exposure percentage, and the trigger honestly stays NO_REMARKET since
+    no real exposure-% / loss-history / incumbent-offer signal exists for
+    this bind (per the approved narrow scope)."""
+    bind_pkg = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="SUB-LIVE-RR-1",
+        workflow="binder_issuance",
+        payload={
+            "bind_id": "BIND-LIVE-1",
+            "submission_id": "SUB-LIVE-RR-1",
+            "named_insured": "Live Test Insured",
+            "carrier_id": "CAR-01",
+            "carrier_name": "Meridian Excess & Surplus",
+            "requested_bind_terms": {},
+        },
+    )
+    endorsement_pkg = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="BIND-LIVE-1",  # endorsement's OutputPackage.submission_id IS the bind_id
+        workflow="endorsement",
+        payload={
+            "endorsement_request_id": "ep-1",
+            "bind_id": "BIND-LIVE-1",
+            "classification": "UNDERWRITING_REVIEW_REQUIRED",
+            "requested_change": {"type": "add_location", "detail": "Added a new location, +$5M TIV"},
+            "drafted_request": {"body": "..."},
+        },
+    )
+    es_session.add_all([bind_pkg, endorsement_pkg])
+    await es_session.commit()
+
+    binds = await list_live_binds(es_ctx, es_session)
+    assert any(b.bind_id == "BIND-LIVE-1" for b in binds)
+
+    item = await run_renewal_remarketing_live(
+        RunLiveRequest(bind_id="BIND-LIVE-1"), es_ctx, es_session
+    )
+    payload = item.payload
+    assert payload.named_insured == "Live Test Insured"
+    assert payload.incumbent_carrier_name == "Meridian Excess & Surplus"
+    assert payload.exposure_change.pct_change == 0.0  # never a guessed number
+    assert payload.exposure_change.already_endorsed is True
+    assert "already endorsed" in (payload.exposure_change.note or "").lower()
+    assert payload.trigger_decision.level == "NO_REMARKET"
+
+
+async def test_run_live_no_endorsement_never_fabricates_already_endorsed(
+    es_ctx, es_session
+) -> None:
+    bind_pkg = OutputPackageRow(
+        tenant_id=es_ctx.tenant_id,
+        submission_id="SUB-LIVE-RR-2",
+        workflow="binder_issuance",
+        payload={
+            "bind_id": "BIND-LIVE-2",
+            "submission_id": "SUB-LIVE-RR-2",
+            "named_insured": "Another Live Insured",
+            "carrier_id": "CAR-03",
+            "carrier_name": "Ironclad Casualty Solutions",
+            "requested_bind_terms": {},
+        },
+    )
+    es_session.add(bind_pkg)
+    await es_session.commit()
+
+    item = await run_renewal_remarketing_live(
+        RunLiveRequest(bind_id="BIND-LIVE-2"), es_ctx, es_session
+    )
+    payload = item.payload
+    assert payload.exposure_change.already_endorsed is False
+    assert payload.exposure_change.pct_change == 0.0
+    assert payload.trigger_decision.level == "NO_REMARKET"

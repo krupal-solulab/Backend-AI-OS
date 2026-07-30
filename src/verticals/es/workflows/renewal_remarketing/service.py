@@ -21,6 +21,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.common.dtos import (
     Ctx,
     Decision,
@@ -48,6 +50,7 @@ from verticals.es.workflows.renewal_remarketing.remarket_engine import (
     detect_loss_history_change,
     parse_remarketing_history,
 )
+from verticals.es.workflows.renewal_remarketing.live_ingestion import build_live_renewal_context
 from verticals.es.workflows.renewal_remarketing.scenario_loader import load_scenario
 from verticals.es.workflows.renewal_remarketing.schema import (
     ComparisonOptionOut,
@@ -283,6 +286,27 @@ class RenewalRemarketingPipeline:
 
     async def run(self, ctx: Ctx, inp: WorkflowInput) -> OutputPackage:
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, session: AsyncSession, bind_id: str) -> OutputPackage:
+        """Additive entry point, alongside ``run()``'s fixture-scenario path
+        above — a real trigger-stage review built from an ACTUAL Binder
+        Issuance bind + real Endorsement Processing history for it, instead
+        of a Workflow_16 fixture. See ``live_ingestion.py`` for the exact
+        real fields and its honest limitations (no real exposure %, loss
+        history, or incumbent-offer data exists anywhere in this codebase)."""
+        context = await build_live_renewal_context(session, ctx, bind_id)
+        self._context = context
+        self._bind_id = context.get("bind_id")
+        self._named_insured = context.get("named_insured")
+        self._incumbent_carrier_id = context.get("incumbent_carrier_id")
+        self._incumbent_carrier_name = context.get("incumbent_carrier_name", "")
+        self._is_comparison_stage = False
+
+        raw = RawBundle(submission_id=self._bind_id)
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)
