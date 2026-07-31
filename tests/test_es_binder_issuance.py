@@ -11,8 +11,10 @@ verticals/es/workflows/binder_issuance/eval_test.py for why.
 
 from __future__ import annotations
 
+import base64
 from datetime import date
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -23,16 +25,21 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import DecisionOutcome, ReviewAction, ReviewStatus, Role, Vertical
 from core.config import get_settings
+from core.integrations.repository import upsert_connection
 from core.llm import build_llm_service
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
 from verticals.es.workflows.agent_communication.router import list_agent_communication
 from verticals.es.workflows.binder_issuance.coordination_engine import recompute_live_state
 from verticals.es.workflows.binder_issuance.router import (
+    AttachLiveMessageRequest,
     ResolveDiscrepancyRequest,
     RunFromQuoteRequest,
     RunRequest,
+    attach_live_confirmation,
+    attach_live_policy,
     escalate,
+    list_live_inbox,
     resolve_confirmation_discrepancy,
     resolve_policy_discrepancy,
     run_binder_issuance,
@@ -291,3 +298,286 @@ async def test_run_from_quote_comparison_requires_a_selection_first(es_ctx, es_s
             RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
         )
     assert exc_info.value.status_code == 409
+
+
+# --- Live path: attach a real carrier confirmation / issued policy --------
+#
+# Unlike the scenario_* tests above (static Workflow_14 fixture), these prove
+# the NEW live-attach path added this session: a real bind item (already
+# live via run_binder_issuance_from_quote) gets a REAL carrier confirmation
+# email attached (BI-03), then a REAL issued policy (BI-05) — same mocked-
+# Nango-proxy technique as tests/test_es_quote_comparison.py's live tests.
+
+_LIVE_NAMED_INSURED = "Delta Electric Services LLC"
+_LIVE_SUBJECT = f"BOUND - {_LIVE_NAMED_INSURED}"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+async def _ready_ironclad_bind_item(es_ctx, es_session):
+    """Ironclad's scenario_01 quote has only ROUTINE subjectivities (the
+    clean fallback to Meridian's contingent offer) — selecting it produces
+    a real bind item that's READY, not BLOCKED, so the live-confirmation
+    flow below has something to attach to."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    ironclad_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Ironclad Casualty Solutions"
+    )
+    await select_quote(qc_item.id, ironclad_quote.quote_id, es_ctx, es_session)
+    bind_item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    assert bind_item.payload.bind_order_status == "READY"
+    return bind_item
+
+
+def _confirmation_gmail_handler(*, premium: str = "26,500"):
+    body = (
+        f"We're pleased to confirm your bind on {_LIVE_NAMED_INSURED}.\n\n"
+        "Binder Number: IRO-2027-TEST\n"
+        f"Premium: ${premium}\n"
+        "General Liability: $1,000,000 / $2,000,000 aggregate\n"
+        "Deductible: $2,500\n"
+        "Effective Date: 09/01/2027\n"
+        "Policy documents to follow within 30 days.\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+            return httpx.Response(200, json={"messages": [{"id": "msg-confirmation-1"}]})
+        if path == "/proxy/gmail/v1/users/me/messages/msg-confirmation-1":
+            if request.url.params.get("format") == "metadata":
+                return httpx.Response(
+                    200, json={"payload": {"headers": [{"name": "Subject", "value": _LIVE_SUBJECT}]}}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": "uw@ironcladcasualty.com"},
+                            {"name": "Subject", "value": _LIVE_SUBJECT},
+                            {"name": "Date", "value": "Fri, 30 Jul 2027 16:00:00 -0500"},
+                        ],
+                        "mimeType": "text/plain",
+                        "body": {"data": _b64url(body.encode("utf-8"))},
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+    return handler
+
+
+_POLICY_MESSAGE_HANDLER_BODY = (
+    "POLICY DECLARATIONS PAGE (extracted text)\n"
+    f"Named Insured: {_LIVE_NAMED_INSURED}\n"
+    "Policy Number: IRO-POL-2027-TEST\n"
+    "Premium: $26,500\n"
+    "General Liability Limits: $1,000,000/$2,000,000\n"
+    "All Perils: $2,500\n"
+    "Effective Date: 09/01/2027\n"
+)
+
+
+def _policy_gmail_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+        return httpx.Response(200, json={"messages": [{"id": "msg-policy-1"}]})
+    if path == "/proxy/gmail/v1/users/me/messages/msg-policy-1":
+        if request.url.params.get("format") == "metadata":
+            return httpx.Response(
+                200, json={"payload": {"headers": [{"name": "Subject", "value": _LIVE_SUBJECT}]}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "payload": {
+                    "mimeType": "text/plain",
+                    "body": {"data": _b64url(_POLICY_MESSAGE_HANDLER_BODY.encode("utf-8"))},
+                }
+            },
+        )
+    return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+
+@pytest.fixture
+async def live_gmail_connected(es_ctx, es_session, monkeypatch):
+    """A tenant with Gmail "connected" and CONNECTORS_MODE forced to "live"
+    for this test only — ``get_settings()`` is ``@lru_cache``d, so the cache
+    must be cleared on both sides of the env-var flip (see this session's
+    Quote Comparison live tests for the same fix)."""
+    monkeypatch.setenv("CONNECTORS_MODE", "live")
+    get_settings.cache_clear()
+    await upsert_connection(
+        es_session, es_ctx.tenant_id, "google-mail",
+        nango_connection_id="conn-live-bi", status="connected",
+    )
+    yield
+    get_settings.cache_clear()
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient  # captured once at import time — a test that
+# patches httpx.AsyncClient twice (confirmation handler, then policy handler) must
+# always rebuild from the TRUE original, not whatever monkeypatch last set it to
+# (monkeypatch only restores at test teardown, not between same-test setattr calls).
+
+
+def _patch_gmail(monkeypatch, handler) -> None:
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_ASYNC_CLIENT(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+async def test_live_inbox_discovers_real_candidate_messages(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    _patch_gmail(monkeypatch, _confirmation_gmail_handler())
+
+    messages = await list_live_inbox(bind_item.id, es_ctx, es_session)
+    assert {m.id for m in messages} == {"msg-confirmation-1"}
+    assert messages[0].subject == _LIVE_SUBJECT
+
+
+async def test_attach_live_confirmation_clean_fires_placement_confirmation(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    _patch_gmail(monkeypatch, _confirmation_gmail_handler())
+    before = await list_agent_communication(es_ctx, es_session)
+
+    updated = await attach_live_confirmation(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.bind_order_status == "SENT"
+    assert payload.carrier_confirmation.reconciliation_status == "CLEAN"
+    assert payload.carrier_confirmation.binder_number == "IRO-2027-TEST"
+    assert payload.downstream_triggers_fired.placement_confirmation is True
+
+    after = await list_agent_communication(es_ctx, es_session)
+    assert len(after) == len(before) + 1
+
+
+async def test_attach_live_confirmation_flags_real_discrepancy(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Confirmation premium ($30,000) doesn't match the requested $26,500 —
+    BI-03 must flag it, never silently accept the carrier's number."""
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    _patch_gmail(monkeypatch, _confirmation_gmail_handler(premium="30,000"))
+    before = await list_agent_communication(es_ctx, es_session)
+
+    updated = await attach_live_confirmation(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.bind_order_status == "SENT"
+    assert payload.carrier_confirmation.reconciliation_status == "DISCREPANCY_FLAGGED"
+    assert any(d.field == "premium" for d in payload.carrier_confirmation.discrepancy_detail)
+    assert payload.downstream_triggers_fired.placement_confirmation is False
+
+    after = await list_agent_communication(es_ctx, es_session)
+    assert len(after) == len(before)  # never fires on an unresolved discrepancy
+
+
+async def test_attach_live_confirmation_rejected_when_blocked(es_ctx, es_session) -> None:
+    """Meridian's quote carries a still-open material subjectivity —
+    BLOCKED — attaching a confirmation must be rejected, not silently
+    proceed past an unresolved pre-bind blocker (BI-02)."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    meridian_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Meridian Excess & Surplus"
+    )
+    await select_quote(qc_item.id, meridian_quote.quote_id, es_ctx, es_session)
+    bind_item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    assert bind_item.payload.bind_order_status == "BLOCKED"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await attach_live_confirmation(
+            bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+        )
+    assert exc_info.value.status_code == 409
+
+
+async def test_attach_live_policy_requires_confirmation_first(es_ctx, es_session) -> None:
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    with pytest.raises(HTTPException) as exc_info:
+        await attach_live_policy(
+            bind_item.id, AttachLiveMessageRequest(message_id="msg-policy-1"), es_ctx, es_session
+        )
+    assert exc_info.value.status_code == 409
+
+
+async def test_attach_live_policy_clean_fires_only_the_new_trigger(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """The important regression guard: attaching the issued policy after the
+    confirmation is already clean must fire Policy Documents Delivered
+    exactly once, and must NOT re-fire Placement Confirmation a second time
+    (fire_binder_issuance_result isn't idempotent on its own — the router
+    must diff old vs. new downstream_triggers_fired)."""
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    _patch_gmail(monkeypatch, _confirmation_gmail_handler())
+    await attach_live_confirmation(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+    )
+    after_confirmation = await list_agent_communication(es_ctx, es_session)
+
+    _patch_gmail(monkeypatch, _policy_gmail_handler)
+    updated = await attach_live_policy(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-policy-1"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.issued_policy_reconciliation.status == "CLEAN"
+    assert payload.policy_issuance.documents_received is True
+    assert payload.downstream_triggers_fired.policy_documents_delivered is True
+
+    after_policy = await list_agent_communication(es_ctx, es_session)
+    assert len(after_policy) == len(after_confirmation) + 1  # exactly one NEW draft, not two
+
+
+async def test_attach_live_policy_flags_real_discrepancy(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Issued policy's premium doesn't match the confirmed $26,500 —
+    Scenario 06's exact single-field-mismatch failure mode, proven here on
+    the live path instead of the fixture."""
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    _patch_gmail(monkeypatch, _confirmation_gmail_handler())
+    await attach_live_confirmation(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+    )
+
+    def mismatched_policy_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+            return httpx.Response(200, json={"messages": [{"id": "msg-policy-2"}]})
+        if path == "/proxy/gmail/v1/users/me/messages/msg-policy-2":
+            body = _POLICY_MESSAGE_HANDLER_BODY.replace("Premium: $26,500", "Premium: $27,000")
+            return httpx.Response(
+                200,
+                json={"payload": {"mimeType": "text/plain", "body": {"data": _b64url(body.encode())}}},
+            )
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    _patch_gmail(monkeypatch, mismatched_policy_handler)
+    updated = await attach_live_policy(
+        bind_item.id, AttachLiveMessageRequest(message_id="msg-policy-2"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.issued_policy_reconciliation.status == "POLICY_DISCREPANCY_FLAGGED"
+    assert any(d.field == "premium" for d in payload.issued_policy_reconciliation.discrepancy_detail)
+    assert payload.downstream_triggers_fired.policy_documents_delivered is False

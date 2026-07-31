@@ -304,6 +304,39 @@ class LiveNangoConnectorService:
         ]
         return RawBundle(submission_id=message_id, email_body=body, documents=documents)
 
+    async def fetch_email_as_text(self, ctx: Ctx, message_id: str) -> str:
+        """Real message, reconstructed as plain ``From/Subject/Date + body`` text
+        — the exact shape ``quote_comparison/quote_parser.py`` already expects
+        (built to parse this from the Workflow_13 fixture files, with no
+        fixture-specific dependency beyond that shape). Deliberately NOT Gmail's
+        raw RFC822 export (``format=raw``) — that carries MIME boundary/
+        Content-Type noise the parser's header/body split was never built to
+        ignore; reusing the same clean header-list + ``_extract_body`` split
+        already used elsewhere in this class avoids that."""
+        client = self._get_client()
+        headers = await self._proxy_headers(ctx)
+        resp = await client.get(
+            f"/proxy/gmail/v1/users/me/messages/{message_id}",
+            headers=headers,
+            params={"format": "full"},
+        )
+        resp.raise_for_status()
+        payload = resp.json().get("payload", {})
+        msg_headers = payload.get("headers", [])
+
+        def _header(name: str) -> str:
+            return next(
+                (h["value"] for h in msg_headers if h["name"].lower() == name.lower()), ""
+            )
+
+        body = _extract_body(payload)
+        return (
+            f"From: {_header('From')}\n"
+            f"Subject: {_header('Subject')}\n"
+            f"Date: {_header('Date')}\n\n"
+            f"{body}"
+        )
+
     async def send_email(self, ctx: Ctx, message: dict[str, Any]) -> SentRef:
         """Sends a real email via Gmail (Nango proxy). MUST only be called from a
         human-triggered action — never from the ingestion path (no auto-send)."""

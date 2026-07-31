@@ -58,6 +58,12 @@ class ReviewItemOut(BaseModel):
     status: str
     deduplicated: bool = False
     payload: DraftCommunicationOut | None = None
+    # Lightweight list-view preview fields (populated by list_agent_communication
+    # below, distinct from the full `payload`) — multiple carriers on the same
+    # submission_id are otherwise visually indistinguishable in the thread list.
+    carrier_name: str | None = None
+    named_insured: str | None = None
+    trigger_type: str | None = None
 
 
 async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewItemRow:
@@ -187,17 +193,31 @@ async def run_agent_communication(
 
 @router.get("")
 async def list_agent_communication(ctx: CtxDep, session: SessionDep) -> list[ReviewItemOut]:
+    """Newest first (a submission with multiple carriers otherwise has no
+    reliable order — the FE's default-select-first-item behavior would
+    surface whichever row the DB happened to return first, real or stale)."""
     rows = (
         await session.execute(
-            select(ReviewItemRow).where(
+            select(ReviewItemRow)
+            .where(
                 col(ReviewItemRow.tenant_id) == ctx.tenant_id,
                 col(ReviewItemRow.workflow) == WORKFLOW_NAME,
             )
+            .order_by(col(ReviewItemRow.created_at).desc())
         )
     ).scalars().all()
-    return [
-        ReviewItemOut(id=r.id, submission_id=r.submission_id, status=r.status.value) for r in rows
-    ]
+    items: list[ReviewItemOut] = []
+    for r in rows:
+        payload = await _payload_for(session, r)
+        items.append(
+            ReviewItemOut(
+                id=r.id, submission_id=r.submission_id, status=r.status.value,
+                carrier_name=(payload or {}).get("carrier_name"),
+                named_insured=(payload or {}).get("named_insured"),
+                trigger_type=(payload or {}).get("trigger_type"),
+            )
+        )
+    return items
 
 
 @router.get("/{item_id}")

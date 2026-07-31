@@ -18,16 +18,20 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, col, select
 
 import core.models  # noqa: F401  (registers tables)
 from core.audit import DefaultAuditService
-from core.common.dtos import AuditEntry, Ctx, WorkflowInput
-from core.common.enums import DecisionOutcome, ReviewAction, ReviewStatus, Role, Vertical
+from core.common.dtos import AuditEntry, Ctx, Decision, Draft, OutputPackage, RawDocument, WorkflowInput
+from core.common.enums import DecisionOutcome, DocumentKind, ReviewAction, ReviewStatus, Role, Vertical
 from core.config import get_settings
+from core.documents import LocalDocumentStore
 from core.llm import build_llm_service
+from core.models import OutputPackage as OutputPackageRow
+from core.models import ReviewItem as ReviewItemRow
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
+from verticals.es.agent_communication_hooks import fire_package_assembly_result
 from verticals.es.workflows.agent_communication.router import (
     RunRequest,
     approve,
@@ -239,3 +243,75 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "agent_communication"})
     assert len(entries) == 1
+
+
+async def _agent_comm_payload_for_submission(
+    session, ctx: Ctx, submission_id: str
+) -> dict | None:
+    item = (
+        await session.execute(
+            select(ReviewItemRow).where(
+                col(ReviewItemRow.tenant_id) == ctx.tenant_id,
+                col(ReviewItemRow.workflow) == "agent_communication",
+                col(ReviewItemRow.submission_id) == submission_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if item is None or not item.output_package_id:
+        return None
+    pkg = (
+        await session.execute(
+            select(OutputPackageRow).where(col(OutputPackageRow.id) == item.output_package_id)
+        )
+    ).scalar_one_or_none()
+    return pkg.payload if pkg else None
+
+
+async def test_fire_package_assembly_result_uses_real_named_insured(es_ctx, es_session) -> None:
+    """Part 5 fix: fire_package_assembly_result previously always passed
+    named_insured=None (MarketMatchingPayload/PackageAssemblyPayload don't
+    carry it) — the auto-fired draft is addressed to nobody. Now it
+    re-derives the real value from the submission's real persisted
+    documents (same mechanism as Package Assembly's own live path)."""
+    await LocalDocumentStore().save(
+        es_session, es_ctx, "SUB-AGENT-COMM-REAL-INSURED",
+        RawDocument(
+            kind=DocumentKind.OTHER,  # real live ingestion also mis-tags by filename
+            filename="acord_application.pdf",
+            content="ACORD 125 - COMMERCIAL INSURANCE APPLICATION\n"
+                     "Named Insured: Riverside Fabrication Co\n",
+        ),
+    )
+    output = OutputPackage(
+        submission_id="SUB-AGENT-COMM-REAL-INSURED",
+        decision=Decision(outcome=DecisionOutcome.PROCEED, rationale="Package status: READY"),
+        draft=Draft(text="n/a", citations=[]),
+        flags=[], missing_info=[], citations=[],
+        payload={"status": "READY", "carrier_name": "Ironclad Casualty Solutions"},
+    )
+    await fire_package_assembly_result(es_session, es_ctx, output)
+
+    payload = await _agent_comm_payload_for_submission(
+        es_session, es_ctx, "SUB-AGENT-COMM-REAL-INSURED"
+    )
+    assert payload is not None
+    assert payload["named_insured"] == "Riverside Fabrication Co"
+
+
+async def test_fire_package_assembly_result_never_fabricates_named_insured(
+    es_ctx, es_session
+) -> None:
+    """No real documents exist for this submission — named_insured must stay
+    honestly None, never a placeholder or guessed value."""
+    output = OutputPackage(
+        submission_id="SUB-AGENT-COMM-NO-DOCS",
+        decision=Decision(outcome=DecisionOutcome.PROCEED, rationale="Package status: READY"),
+        draft=Draft(text="n/a", citations=[]),
+        flags=[], missing_info=[], citations=[],
+        payload={"status": "READY", "carrier_name": "Meridian Excess & Surplus"},
+    )
+    await fire_package_assembly_result(es_session, es_ctx, output)
+
+    payload = await _agent_comm_payload_for_submission(es_session, es_ctx, "SUB-AGENT-COMM-NO-DOCS")
+    assert payload is not None
+    assert payload["named_insured"] is None

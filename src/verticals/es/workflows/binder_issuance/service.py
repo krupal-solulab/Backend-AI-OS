@@ -244,6 +244,26 @@ class BinderIssuancePipeline:
             self._subjectivities, self._requested_terms.effective_date
         )
 
+        # BI-05: a real issued policy attached alongside this confirmation
+        # (live "attach policy" re-run, via run_live_update — never present
+        # here via the fixture path, which always keeps these as two
+        # separate scenario stages; see scenario_loader.py's docstring).
+        # Identical to _decide_issuance_stage's own issued-policy handling
+        # below, just reached from the pre-bind branch instead.
+        if self._parsed_policy is not None:
+            issued = BindTerms(
+                premium=self._parsed_policy.premium,
+                limits_display=self._parsed_policy.limits_display,
+                deductible_all_perils=self._parsed_policy.deductible_all_perils,
+                deductible_wind_hail=self._parsed_policy.deductible_wind_hail,
+                effective_date=self._parsed_policy.effective_date,
+            )
+            self._issued_policy_discrepancies = reconcile(self._bound_terms, issued)
+            self._issued_policy_status = (
+                "CLEAN" if not self._issued_policy_discrepancies else "POLICY_DISCREPANCY_FLAGGED"
+            )
+            self._documents_received = True
+
         if parsed.confirmation_date is not None:
             self._issuance_timeline_days = parsed.stated_issuance_timeline_days
             expected_by, is_default = issuance_expected_by(
@@ -425,13 +445,45 @@ class BinderIssuancePipeline:
         of loading a Workflow_14 fixture. No carrier confirmation/issued
         policy text exists yet at this stage, so this is always a fresh
         pre-bind READY/BLOCKED evaluation, same as a scenario's first pass."""
+        return await self.run_live_update(ctx, broker_bind_instruction)
+
+    async def run_live_update(
+        self,
+        ctx: Ctx,
+        broker_bind_instruction: dict[str, Any],
+        *,
+        confirmation_raw_text: str | None = None,
+        issued_policy_raw_text: str | None = None,
+    ) -> OutputPackage:
+        """Covers every live moment of this bind's lifecycle from the same
+        ``broker_bind_instruction`` shape: initial creation (neither text —
+        what ``run_live()`` above delegates to), attaching a real carrier
+        bind confirmation once it arrives (confirmation text only), and
+        attaching a real issued policy once THAT arrives (confirmation
+        text must be re-supplied on this call too — re-pass whatever was
+        previously persisted, e.g. via ``live_ingestion.
+        load_live_bind_confirmation_text`` — or ``_decide_pre_bind_stage``
+        will see ``self._parsed_confirmation is None`` and short-circuit
+        back to ``READY``, per that function's own already-tested logic)."""
         self._bundle = ScenarioBundle(
             scenario_ref="live", broker_bind_instruction=broker_bind_instruction
         )
         self._submission_id = broker_bind_instruction.get("submission_id")
         self._as_of = datetime.now(UTC).date()
 
-        raw = RawBundle(submission_id=self._submission_id, documents=[])
+        documents = []
+        if confirmation_raw_text is not None:
+            documents.append(RawDocument(
+                kind=DocumentKind.EMAIL, filename="carrier_bind_confirmation.txt",
+                content=confirmation_raw_text,
+            ))
+        if issued_policy_raw_text is not None:
+            documents.append(RawDocument(
+                kind=DocumentKind.OTHER, filename="issued_policy_document_extract.txt",
+                content=issued_policy_raw_text,
+            ))
+
+        raw = RawBundle(submission_id=self._submission_id, documents=documents)
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

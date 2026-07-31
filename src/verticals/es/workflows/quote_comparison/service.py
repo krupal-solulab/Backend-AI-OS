@@ -18,6 +18,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from core.common.dtos import (
     Citation,
     Ctx,
@@ -43,6 +45,7 @@ from verticals.es.workflows.quote_comparison.comparison_engine import (
     make_quotes,
     recommend,
 )
+from verticals.es.workflows.quote_comparison.live_ingestion import load_live_response_bundle
 from verticals.es.workflows.quote_comparison.quote_parser import ParsedResponse, parse_response
 from verticals.es.workflows.quote_comparison.scenario_loader import load_scenario
 from verticals.es.workflows.quote_comparison.schema import (
@@ -275,6 +278,32 @@ class QuoteComparisonPipeline:
 
     async def run(self, ctx: Ctx, inp: WorkflowInput) -> OutputPackage:
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def ingest_live(
+        self, ctx: Ctx, session: AsyncSession, submission_id: str
+    ) -> RawBundle:
+        """Live counterpart to ``ingest()``: raw documents are every real
+        carrier-response email persisted so far for this submission (via
+        ``live_ingestion.save_live_response``), not the static Workflow_13
+        scenario. ``extract()`` is untouched — it already just parses
+        whatever raw documents it's handed, exactly like the fixture path."""
+        self._submission_id = submission_id
+        self._as_of = datetime.now(UTC).date()
+        return await load_live_response_bundle(session, ctx, submission_id)
+
+    async def run_live(
+        self, ctx: Ctx, session: AsyncSession, submission_id: str
+    ) -> OutputPackage:
+        """Live counterpart to ``run()``. extract()/decide()/draft()/package()
+        are the exact same generic pipeline stages the fixture path uses — a
+        submission with 0 or 1 accumulated responses so far is already handled
+        safely by ``comparison_engine.recommend()``'s ``len(viable) < 2``
+        branches, so no special-casing is needed here."""
+        raw = await self.ingest_live(ctx, session, submission_id)
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

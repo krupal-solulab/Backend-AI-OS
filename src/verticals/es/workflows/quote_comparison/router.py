@@ -24,6 +24,7 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import ReviewAction
 from core.db import get_session
+from core.ingestion.connectors import ConnectorNotConnectedError
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
@@ -31,6 +32,10 @@ from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
 from verticals.es.agent_communication_hooks import fire_quote_comparison_result
 from verticals.es.workflows.quote_comparison.comparison_engine import recompute_urgency_from_payload
+from verticals.es.workflows.quote_comparison.live_ingestion import (
+    discover_live_carrier_responses,
+    save_live_response,
+)
 from verticals.es.workflows.quote_comparison.schema import ComparisonPayload
 from verticals.es.workflows.quote_comparison.service import (
     DEFAULT_WORKFLOW_N,
@@ -58,6 +63,16 @@ class ReviewItemOut(BaseModel):
     submission_id: str | None
     status: str
     payload: ComparisonPayload | None = None
+
+
+class LiveInboxMessageOut(BaseModel):
+    id: str
+    subject: str
+
+
+class RunLiveRequest(BaseModel):
+    submission_id: str  # real submission (16-hex-char Gmail-derived id)
+    message_id: str  # real Gmail message id, picked from /live-inbox
 
 
 async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewItemRow:
@@ -96,6 +111,52 @@ async def run_quote_comparison(body: RunRequest, ctx: CtxDep, session: SessionDe
         params={"as_of": body.as_of} if body.as_of else {},
     )
     output = await pipeline.run(ctx, inp)
+
+    review_queue = DefaultReviewQueueService()
+    item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=ComparisonPayload(**output.payload),
+    )
+
+
+@router.get("/live-inbox")
+async def list_live_inbox(
+    submission_id: str, ctx: CtxDep, session: SessionDep
+) -> list[LiveInboxMessageOut]:
+    """Real Gmail messages that could be a carrier response for this real
+    submission — matched by its real named insured in the subject line (see
+    ``live_ingestion.discover_live_carrier_responses``). Additive alongside
+    the fixture-scenario ``/run`` above; requires Gmail connected +
+    CONNECTORS_MODE=live."""
+    try:
+        messages = await discover_live_carrier_responses(session, ctx, submission_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    return [LiveInboxMessageOut(**m) for m in messages]
+
+
+@router.post("/run-live", status_code=status.HTTP_201_CREATED)
+async def run_quote_comparison_live(
+    body: RunLiveRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: persists the picked real carrier-
+    response email, then re-runs the comparison against EVERY real response
+    accumulated so far for this submission (FR-3) — never just the latest
+    one. Never fires Agent Communication itself — see module docstring."""
+    try:
+        await save_live_response(session, ctx, body.submission_id, body.message_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+
+    pipeline = _pipeline()
+    output = await pipeline.run_live(ctx, session, body.submission_id)
 
     review_queue = DefaultReviewQueueService()
     item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)

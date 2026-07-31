@@ -11,17 +11,21 @@ verticals/es/workflows/quote_comparison/eval_test.py for why.
 
 from __future__ import annotations
 
+import base64
 from datetime import date
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
 import core.models  # noqa: F401  (registers tables)
 from core.audit import DefaultAuditService
-from core.common.dtos import AuditEntry, Ctx, WorkflowInput
-from core.common.enums import DecisionOutcome, ReviewAction, ReviewStatus, Role, Vertical
+from core.common.dtos import AuditEntry, Ctx, RawDocument, WorkflowInput
+from core.common.enums import DecisionOutcome, DocumentKind, ReviewAction, ReviewStatus, Role, Vertical
 from core.config import get_settings
+from core.documents import LocalDocumentStore
+from core.integrations.repository import upsert_connection
 from core.llm import build_llm_service
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
@@ -33,8 +37,11 @@ from verticals.es.workflows.quote_comparison.comparison_engine import (
 )
 from verticals.es.workflows.quote_comparison.quote_parser import ParsedResponse, Subjectivity
 from verticals.es.workflows.quote_comparison.router import (
+    RunLiveRequest,
     RunRequest,
+    list_live_inbox,
     run_quote_comparison,
+    run_quote_comparison_live,
     select_quote,
 )
 from verticals.es.workflows.quote_comparison.service import QuoteComparisonPipeline
@@ -292,3 +299,219 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "quote_comparison"})
     assert len(entries) == 1
+
+
+# --- Live path (real Gmail, via a mocked Nango proxy) ---------------------
+#
+# Unlike the scenario_* tests above (static Workflow_13 fixture), these prove
+# the NEW live-ingestion path added this session: real carrier-response
+# emails, matched to a real submission by its real named insured, persisted
+# and accumulated one at a time (FR-3), then run through the exact same
+# unchanged quote_parser/comparison_engine. Same mocked-Nango-proxy technique
+# as tests/test_live_nango_connector.py — no real network, no extra
+# dependency.
+
+_LIVE_SUBMISSION_ID = "SUB-QC-LIVE-01"
+_LIVE_NAMED_INSURED = "Harborview Electrical Contractors LLC"
+_LIVE_SUBJECT = f"RE: {_LIVE_NAMED_INSURED} - Quote Terms"
+
+_LIVE_MESSAGES = {
+    "msg-quote-1": {
+        "from": "underwriting@ironcladcasualty.com",
+        "date": "Tue, 27 Jul 2027 10:15:00 -0500",
+        "body": (
+            f"We're pleased to offer terms on {_LIVE_NAMED_INSURED}:\n\n"
+            "Premium: $26,500\n"
+            "General Liability: $1,000,000 / $2,000,000 aggregate\n"
+            "Deductible: $2,500\n"
+            "Effective Date: 09/01/2027\n"
+            "Quote valid through: 08/25/2027\n"
+        ),
+    },
+    "msg-quote-2": {
+        "from": "underwriting@meridianexcess.com",
+        "date": "Wed, 28 Jul 2027 09:00:00 -0500",
+        "body": (
+            f"We're pleased to offer terms on {_LIVE_NAMED_INSURED}:\n\n"
+            "Premium: $24,000\n"
+            "General Liability: $1,000,000 / $2,000,000 aggregate\n"
+            "Deductible: $2,500\n"
+            "Effective Date: 09/01/2027\n"
+            "Quote valid through: 08/20/2027\n"
+        ),
+    },
+}
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _live_quote_gmail_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+        return httpx.Response(200, json={"messages": [{"id": mid} for mid in _LIVE_MESSAGES]})
+    for mid, msg in _LIVE_MESSAGES.items():
+        if path == f"/proxy/gmail/v1/users/me/messages/{mid}":
+            if request.url.params.get("format") == "metadata":
+                return httpx.Response(
+                    200,
+                    json={"payload": {"headers": [{"name": "Subject", "value": _LIVE_SUBJECT}]}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": msg["from"]},
+                            {"name": "Subject", "value": _LIVE_SUBJECT},
+                            {"name": "Date", "value": msg["date"]},
+                        ],
+                        "mimeType": "text/plain",
+                        "body": {"data": _b64url(msg["body"].encode("utf-8"))},
+                    }
+                },
+            )
+    return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+
+@pytest.fixture
+async def live_gmail_connected(es_ctx, es_session, monkeypatch):
+    """A tenant with Gmail "connected" (real Connection row), CONNECTORS_MODE
+    forced to "live" for this test only (default test env is "mock" — same
+    as production until an operator flips it), and every Nango proxy call
+    routed to the fake handler above instead of the network.
+
+    ``get_settings()`` is ``@lru_cache``d (core/config.py) — a bare
+    ``monkeypatch.setenv`` is invisible to it once any earlier test/import
+    has already called it this pytest session, so the cache must be cleared
+    on both sides of the env-var flip."""
+    monkeypatch.setenv("CONNECTORS_MODE", "live")
+    get_settings.cache_clear()
+    await upsert_connection(
+        es_session, es_ctx.tenant_id, "google-mail",
+        nango_connection_id="conn-live-qc", status="connected",
+    )
+    real_async_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(_live_quote_gmail_handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    yield
+    get_settings.cache_clear()
+
+
+async def _seed_live_named_insured(es_session, es_ctx) -> None:
+    """A real persisted document is what lets ``build_live_extracted_model``
+    resolve the submission's real named insured (same mechanism already used
+    by Package Assembly's and Agent Communication's live paths) — needed by
+    ``discover_live_carrier_responses`` to know what to search Gmail for."""
+    await LocalDocumentStore().save(
+        es_session, es_ctx, _LIVE_SUBMISSION_ID,
+        RawDocument(
+            kind=DocumentKind.OTHER,
+            filename="acord_application.pdf",
+            content=f"ACORD 125 - COMMERCIAL INSURANCE APPLICATION\nNamed Insured: {_LIVE_NAMED_INSURED}\n",
+        ),
+    )
+
+
+async def test_live_inbox_discovers_real_candidate_messages(
+    es_ctx, es_session, live_gmail_connected
+) -> None:
+    """The live-inbox picker searches Gmail by the submission's own real
+    named insured — never the whole inbox — and lists whatever real messages
+    come back, unparsed (the broker picks; ``/run-live`` parses)."""
+    await _seed_live_named_insured(es_session, es_ctx)
+    messages = await list_live_inbox(_LIVE_SUBMISSION_ID, es_ctx, es_session)
+    assert {m.id for m in messages} == {"msg-quote-1", "msg-quote-2"}
+    assert all(m.subject == _LIVE_SUBJECT for m in messages)
+
+
+async def test_live_inbox_empty_without_real_named_insured_yet() -> None:
+    """No documents persisted yet for this submission — nothing to search
+    Gmail for, so the picker returns empty rather than searching blind."""
+    from verticals.es.workflows.quote_comparison.live_ingestion import (
+        discover_live_carrier_responses,
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    ctx = Ctx(tenant_id="demo-es-empty", vertical=Vertical.ES, user_id="u-jr", role=Role.JUNIOR)
+    async with maker() as session:
+        session.add(Tenant(id="demo-es-empty", name="Demo E&S Empty", vertical=Vertical.ES))
+        await session.commit()
+        messages = await discover_live_carrier_responses(session, ctx, "SUB-NO-DOCS-YET")
+    await engine.dispose()
+    assert messages == []
+
+
+async def test_run_live_extracts_real_single_carrier_response(
+    es_ctx, es_session, live_gmail_connected
+) -> None:
+    """First real carrier response for this submission — proves ``run_live()``
+    handles a single accumulated response safely (comparison_engine.recommend's
+    ``len(viable) < 2`` branch) and extracts real, grounded terms, not a
+    fixture."""
+    await _seed_live_named_insured(es_session, es_ctx)
+    body = RunLiveRequest(submission_id=_LIVE_SUBMISSION_ID, message_id="msg-quote-1")
+    item = await run_quote_comparison_live(body, es_ctx, es_session)
+
+    payload = item.payload
+    assert payload.named_insured == _LIVE_NAMED_INSURED
+    assert len(payload.quotes) == 1
+    quote = payload.quotes[0]
+    assert quote.carrier_name == "Ironclad Casualty Solutions"
+    assert quote.premium == 26_500.0
+    assert quote.source_email_reference == "response_msg-quote-1.txt"
+    assert payload.output_mode in ("SINGLE_QUOTE_ROUTINE", "SINGLE_QUOTE_URGENT")
+
+
+async def test_run_live_accumulates_second_real_response(
+    es_ctx, es_session, live_gmail_connected
+) -> None:
+    """FR-3: a second real reply for the SAME submission must update the
+    comparison to include both responses received so far, not just the
+    latest one."""
+    await _seed_live_named_insured(es_session, es_ctx)
+    await run_quote_comparison_live(
+        RunLiveRequest(submission_id=_LIVE_SUBMISSION_ID, message_id="msg-quote-1"),
+        es_ctx, es_session,
+    )
+    second = await run_quote_comparison_live(
+        RunLiveRequest(submission_id=_LIVE_SUBMISSION_ID, message_id="msg-quote-2"),
+        es_ctx, es_session,
+    )
+
+    payload = second.payload
+    assert len(payload.quotes) == 2
+    carriers = {q.carrier_name for q in payload.quotes}
+    assert carriers == {"Ironclad Casualty Solutions", "Meridian Excess & Surplus"}
+    premiums = {q.carrier_name: q.premium for q in payload.quotes}
+    assert premiums == {"Ironclad Casualty Solutions": 26_500.0, "Meridian Excess & Surplus": 24_000.0}
+
+
+async def test_run_live_without_gmail_connected_raises_clear_error(
+    es_ctx, es_session, monkeypatch
+) -> None:
+    """CONNECTORS_MODE=live but no Connection row for this tenant — must
+    raise a clear, actionable error (HTTP 428), never silently fabricate a
+    result."""
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("CONNECTORS_MODE", "live")
+    get_settings.cache_clear()
+    try:
+        await _seed_live_named_insured(es_session, es_ctx)
+        with pytest.raises(HTTPException) as exc_info:
+            await run_quote_comparison_live(
+                RunLiveRequest(submission_id=_LIVE_SUBMISSION_ID, message_id="msg-quote-1"),
+                es_ctx, es_session,
+            )
+        assert exc_info.value.status_code == 428
+    finally:
+        get_settings.cache_clear()

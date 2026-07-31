@@ -25,6 +25,7 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import ReviewAction
 from core.db import get_session
+from core.ingestion.connectors import ConnectorNotConnectedError
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
@@ -34,6 +35,11 @@ from verticals.es.agent_communication_hooks import fire_binder_issuance_result
 from verticals.es.workflows.binder_issuance.coordination_engine import recompute_live_state
 from verticals.es.workflows.binder_issuance.live_ingestion import (
     build_broker_bind_instruction_from_quote,
+    discover_live_bind_messages,
+    instruction_from_stored_payload,
+    load_live_bind_confirmation_text,
+    save_live_bind_confirmation,
+    save_live_issued_policy,
 )
 from verticals.es.workflows.binder_issuance.schema import BindCoordinationPayload
 from verticals.es.workflows.binder_issuance.service import (
@@ -73,6 +79,15 @@ class ReviewItemOut(BaseModel):
     submission_id: str | None
     status: str
     payload: BindCoordinationPayload | None = None
+
+
+class LiveInboxMessageOut(BaseModel):
+    id: str
+    subject: str
+
+
+class AttachLiveMessageRequest(BaseModel):
+    message_id: str  # real Gmail message id, picked from /live-inbox
 
 
 async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewItemRow:
@@ -138,6 +153,147 @@ async def run_binder_issuance_from_quote(
     await fire_binder_issuance_result(
         session, ctx, submission_id=item.submission_id, payload=output.payload
     )
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=BindCoordinationPayload(**output.payload),
+    )
+
+
+async def _fire_newly_true_triggers(
+    session: AsyncSession, ctx: Ctx, item: ReviewItemRow,
+    old_payload: dict[str, Any], new_payload: dict[str, Any],
+) -> None:
+    """``fire_binder_issuance_result`` fires whatever
+    ``downstream_triggers_fired`` says is ``True``, unconditionally — and a
+    trigger that's already ``True`` stays ``True`` on every later live
+    re-run (e.g. ``placement_confirmation`` when the policy is attached
+    afterward), so re-passing the FULL new payload here would re-fire it a
+    second time. Only the NEWLY-true keys get passed through — same
+    technique ``_resolve_discrepancy`` below already uses for one hardcoded
+    key, generalized to a dict diff."""
+    old_triggers = old_payload.get("downstream_triggers_fired") or {}
+    new_triggers = new_payload.get("downstream_triggers_fired") or {}
+    newly_fired = {k: v for k, v in new_triggers.items() if v and not old_triggers.get(k)}
+    if newly_fired:
+        single_trigger_payload = {**new_payload, "downstream_triggers_fired": newly_fired}
+        await fire_binder_issuance_result(
+            session, ctx, submission_id=item.submission_id, payload=single_trigger_payload
+        )
+
+
+@router.get("/live-inbox")
+async def list_live_inbox(
+    item_id: str, ctx: CtxDep, session: SessionDep
+) -> list[LiveInboxMessageOut]:
+    """Real Gmail messages that could be this bind's carrier confirmation OR
+    its eventual issued policy — matched by the bind's own real named
+    insured (see ``live_ingestion.discover_live_bind_messages``). Additive
+    alongside ``/run`` above; requires Gmail connected +
+    CONNECTORS_MODE=live."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    named_insured = (pkg.payload or {}).get("named_insured") if pkg else None
+    try:
+        messages = await discover_live_bind_messages(session, ctx, named_insured)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    return [LiveInboxMessageOut(**m) for m in messages]
+
+
+@router.post("/{item_id}/attach-live-confirmation")
+async def attach_live_confirmation(
+    item_id: str, body: AttachLiveMessageRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: attaches a REAL carrier bind-
+    confirmation email to this real live bind item — advances READY -> SENT
+    and runs BI-03 reconciliation for real, instead of a Workflow_14
+    fixture's ``carrier_bind_confirmation.txt``. Updates this SAME review
+    item in place (no new item created), same direct-mutation technique as
+    ``_resolve_discrepancy`` below."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None or pkg.payload is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no coordination payload for this item")
+    old_payload = pkg.payload
+    if old_payload.get("bind_order_status") == "BLOCKED":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "bind order is BLOCKED on an unresolved material pre-bind subjectivity — "
+            "resolve that first",
+        )
+
+    try:
+        text = await save_live_bind_confirmation(session, ctx, item_id, body.message_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+
+    instruction = instruction_from_stored_payload(old_payload)
+    pipeline = _pipeline()
+    output = await pipeline.run_live_update(ctx, instruction, confirmation_raw_text=text)
+
+    pkg.payload = output.payload
+    session.add(pkg)
+    await session.commit()
+    await _fire_newly_true_triggers(session, ctx, item, old_payload, output.payload)
+
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=BindCoordinationPayload(**output.payload),
+    )
+
+
+@router.post("/{item_id}/attach-live-policy")
+async def attach_live_policy(
+    item_id: str, body: AttachLiveMessageRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: attaches a REAL issued-policy
+    document to this real live bind item — runs BI-05 reconciliation
+    against the CONFIRMED terms, instead of a Workflow_14 fixture's
+    ``issued_policy_document_extract.txt``. Updates this SAME review item
+    in place, same as ``attach_live_confirmation`` above."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None or pkg.payload is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no coordination payload for this item")
+    old_payload = pkg.payload
+    if old_payload.get("bind_order_status") != "SENT":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "no confirmed bind yet — attach a real bind confirmation first",
+        )
+
+    try:
+        policy_text = await save_live_issued_policy(session, ctx, item_id, body.message_id)
+        confirmation_text = await load_live_bind_confirmation_text(session, ctx, item_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    if confirmation_text is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this bind's own confirmation text is missing — re-attach the bind confirmation first",
+        )
+
+    instruction = instruction_from_stored_payload(old_payload)
+    pipeline = _pipeline()
+    output = await pipeline.run_live_update(
+        ctx, instruction,
+        confirmation_raw_text=confirmation_text, issued_policy_raw_text=policy_text,
+    )
+
+    pkg.payload = output.payload
+    session.add(pkg)
+    await session.commit()
+    await _fire_newly_true_triggers(session, ctx, item, old_payload, output.payload)
+
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=BindCoordinationPayload(**output.payload),

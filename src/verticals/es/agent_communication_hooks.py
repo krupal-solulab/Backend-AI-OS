@@ -35,16 +35,17 @@ response of, the workflow that triggered it — Market Matching/Package
 Assembly's callers must see byte-identical behavior whether this hook
 succeeds, fails, or (in dev, no ``TEST_DATA_ROOT``/LLM key) does either.
 
-**Known v1 limitation, accepted deliberately (see STATUS.md):**
+**Formerly a known v1 limitation, now fixed for the live path:**
 ``MarketMatchingPayload``/``PackageAssemblyPayload`` don't carry
-``named_insured`` — both pipelines resolve ``acord.named_insured`` internally
-(see ``package_assembly/submission_resolver.py``) but never return it past
-their own ``pipeline.run()``. Rather than add new fields to either payload
-("only from data these workflows already produce, no new extraction"),
-auto-fired drafts simply lack it; ``drafting.py``'s ``_subject_line``/
-``build_facts`` already treat every trigger field as optional and fall back
-gracefully (a generic "Submission - ..." subject line), so this degrades
-quality, not correctness.
+``named_insured`` in their own output — so ``fire_no_market_found`` and
+``fire_package_assembly_result`` re-derive it via ``_real_named_insured``
+(below), which reuses ``package_assembly/live_ingestion.py``'s
+``build_live_extracted_model`` to re-extract the submission's real,
+already-persisted documents (no new extraction judgment). Still stays
+``None`` (never fabricated), not "Submission", if no real documents exist
+for that submission id — ``drafting.py``'s ``_subject_line``/``build_facts``
+already treat every trigger field as optional and fall back gracefully in
+that case.
 
 **Scope decision, per the approved plan (not a mechanical default):**
 Submission Acknowledgment fires **per carrier** from Package Assembly's own
@@ -63,8 +64,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.common.dtos import Ctx, OutputPackage, WorkflowInput
-from core.common.enums import DecisionOutcome
+from core.common.dtos import Ctx, ExtractedModel, OutputPackage, WorkflowInput
+from core.common.enums import DecisionOutcome, DocumentKind
 from core.llm import build_llm_service
 from core.review_queue import DefaultReviewQueueService
 from verticals.es.workflows.agent_communication.router import (
@@ -74,8 +75,32 @@ from verticals.es.workflows.agent_communication.service import (
     WORKFLOW_NAME,
     AgentCommunicationPipeline,
 )
+from verticals.es.workflows.package_assembly.live_ingestion import build_live_extracted_model
 
 log = logging.getLogger(__name__)
+
+_DOC_KIND_PREFIXES = tuple(k.value for k in DocumentKind)
+
+
+async def _real_named_insured(
+    session: AsyncSession, ctx: Ctx, submission_id: str | None
+) -> str | None:
+    """Market Matching's and Package Assembly's own payloads don't carry
+    ``named_insured`` (see module docstring's "known v1 limitation"), so
+    these two auto-fire hooks re-derive it the same way Package Assembly's
+    own live path does: re-extracting the submission's already-persisted
+    real documents (``build_live_extracted_model``, package_assembly's
+    live_ingestion.py) — no new extraction judgment, just reusing data
+    already on file. Returns None (never fabricated) if no submission id
+    or no matching field is found."""
+    if not submission_id:
+        return None
+    model: ExtractedModel = await build_live_extracted_model(session, ctx, submission_id)
+    for prefix in _DOC_KIND_PREFIXES:
+        match = next((f for f in model.fields if f.name == f"{prefix}.named_insured"), None)
+        if match is not None and match.value not in (None, ""):
+            return str(match.value)
+    return None
 
 
 async def _draft_and_enqueue(
@@ -111,6 +136,7 @@ async def fire_no_market_found(session: AsyncSession, ctx: Ctx, output: OutputPa
             "trigger_type": "NO_MARKET_FOUND",
             "source_workflow": "Market Matching",
             "submission_id": output.submission_id,
+            "named_insured": await _real_named_insured(session, ctx, output.submission_id),
             "zero_match_result": True,
             "carriers_reviewed_count": len(matches) + len(excluded),
             "diligent_search": payload.get("diligent_search"),
@@ -134,12 +160,14 @@ async def fire_package_assembly_result(
         payload = output.payload or {}
         pkg_status = payload.get("status")
         carrier_name = payload.get("carrier_name")
+        named_insured = await _real_named_insured(session, ctx, output.submission_id)
 
         if pkg_status == "READY":
             trigger: dict[str, Any] = {
                 "trigger_type": "SUBMISSION_ACKNOWLEDGMENT",
                 "source_workflow": "Package Assembly",
                 "submission_id": output.submission_id,
+                "named_insured": named_insured,
                 "carriers_approached": [carrier_name] if carrier_name else [],
                 "carrier_statuses": (
                     {carrier_name: "READY - submitted"} if carrier_name else {}
@@ -155,6 +183,7 @@ async def fire_package_assembly_result(
                 "trigger_type": "MISSING_INFO_REQUEST",
                 "source_workflow": "Package Assembly",
                 "submission_id": output.submission_id,
+                "named_insured": named_insured,
                 "carrier_name": carrier_name,
                 "package_status": pkg_status,
                 "blocking_items": [i.get("item") for i in (items or []) if i.get("item")],
