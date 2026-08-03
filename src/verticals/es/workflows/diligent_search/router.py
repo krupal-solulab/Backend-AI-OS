@@ -16,7 +16,7 @@ re-invoking another pipeline.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -31,6 +31,7 @@ from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
+from verticals.es.workflows.diligent_search.live_ingestion import discover_live_stub_submissions
 from verticals.es.workflows.diligent_search.schema import ComplianceRecordPayload
 from verticals.es.workflows.diligent_search.service import (
     DEFAULT_WORKFLOW_N,
@@ -59,6 +60,34 @@ class ReviewItemOut(BaseModel):
     payload: ComplianceRecordPayload | None = None
 
 
+class LiveStubSubmissionOut(BaseModel):
+    item_id: str
+    submission_id: str | None
+
+
+class LiveDeclinationInput(BaseModel):
+    carrier: str
+    date: str | None = None
+    written_evidence: bool = False
+
+
+class LiveStateInput(BaseModel):
+    state: str
+    # Broker-supplied determination — never inferred. "pending" means "not
+    # yet checked for this state," which DS-01 already handles honestly via
+    # requirement=None (PENDING_DETERMINATION), no new logic needed.
+    status: Literal["exempt", "required", "pending"]
+    export_list_note: str | None = None
+    admitted_declinations_required: int | None = None
+    declinations: list[LiveDeclinationInput] = []
+
+
+class RunLiveRequest(BaseModel):
+    submission_id: str | None = None
+    named_insured: str | None = None
+    states: list[LiveStateInput]
+
+
 async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewItemRow:
     item = (
         await session.execute(
@@ -74,16 +103,20 @@ async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewI
     return item
 
 
-async def _payload_for(
-    session: AsyncSession, item: ReviewItemRow
-) -> ComplianceRecordPayload | None:
+async def _pkg_row_for(session: AsyncSession, item: ReviewItemRow) -> OutputPackageRow | None:
     if not item.output_package_id:
         return None
-    pkg = (
+    return (
         await session.execute(
             select(OutputPackageRow).where(col(OutputPackageRow.id) == item.output_package_id)
         )
     ).scalar_one_or_none()
+
+
+async def _payload_for(
+    session: AsyncSession, item: ReviewItemRow
+) -> ComplianceRecordPayload | None:
+    pkg = await _pkg_row_for(session, item)
     return ComplianceRecordPayload(**pkg.payload) if pkg and pkg.payload else None
 
 
@@ -113,6 +146,75 @@ async def list_diligent_search(ctx: CtxDep, session: SessionDep) -> list[ReviewI
     return [
         ReviewItemOut(id=r.id, submission_id=r.submission_id, status=r.status.value) for r in rows
     ]
+
+
+@router.get("/live-submissions")
+async def list_live_submissions(ctx: CtxDep, session: SessionDep) -> list[LiveStubSubmissionOut]:
+    """Real submissions MM-07 has already flagged (a real, linked stub
+    review item exists) but that no broker has completed a real search
+    for yet — see live_ingestion.py's module docstring for why this
+    discovers rather than auto-determines."""
+    stubs = await discover_live_stub_submissions(session, ctx)
+    return [LiveStubSubmissionOut(**s) for s in stubs]
+
+
+@router.post("/{item_id}/run-live")
+async def run_diligent_search_live(
+    item_id: str, body: RunLiveRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: a real per-state determination
+    from broker/compliance-supplied facts and declination records for a
+    real, MM-07-seeded submission — updates this SAME review item in
+    place (no new item created), same direct-mutation technique as
+    Binder & Issuance's ``attach_live_confirmation``."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no compliance record payload for this item")
+
+    states: list[dict] = []
+    for s in body.states:
+        if s.status == "pending":
+            requirement = None
+            declinations = None
+        elif s.status == "exempt":
+            requirement = {"export_list_class": True, "export_list_note": s.export_list_note}
+            declinations = None
+        elif s.admitted_declinations_required is None:
+            # "Required" but the broker hasn't entered how many declinations
+            # are actually needed — treating that as 0 would let ANY (even
+            # zero) declinations trivially satisfy the sufficiency check,
+            # the exact silent-false-pass this workflow's zero-tolerance
+            # gate exists to prevent. Honest instead: requirement=None
+            # routes through DS-01's own null-safety to PENDING_DETERMINATION
+            # ("not yet checked"), never a fabricated count.
+            requirement = None
+            declinations = None
+        else:  # "required", with a real broker-supplied count
+            requirement = {
+                "export_list_class": False,
+                "admitted_declinations_required": s.admitted_declinations_required,
+            }
+            declinations = [d.model_dump() for d in s.declinations]
+        states.append({"state": s.state, "requirement": requirement, "declinations": declinations})
+
+    pipeline = _pipeline()
+    output = await pipeline.run_live(
+        ctx,
+        {
+            "submission_id": body.submission_id or item.submission_id,
+            "named_insured": body.named_insured,
+            "states": states,
+        },
+    )
+
+    pkg.payload = output.payload
+    session.add(pkg)
+    await session.commit()
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=ComplianceRecordPayload(**output.payload),
+    )
 
 
 @router.get("/{item_id}")

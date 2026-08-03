@@ -15,7 +15,7 @@ module's docstring).
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -74,11 +74,19 @@ DEFAULT_WORKFLOW_N = 14  # Workflow_14 in TEST_DATA_ROOT — see DATA_AND_FIXTUR
 def _terms_out(terms: BindTerms | None) -> BindTermsOut:
     if terms is None:
         return BindTermsOut()
+    # No source document (bind confirmation / issued policy) ever states an
+    # expiration date — see schema.py's BindTermsOut docstring. Derived as a
+    # standard 12-month term and always flagged as an assumed default so
+    # downstream consumers (Endorsement Processing's proration, Renewal
+    # Remarketing's FR-1/RR-07) never treat it as a confirmed fact.
+    expiration = terms.effective_date + timedelta(days=365) if terms.effective_date else None
     return BindTermsOut(
         premium=terms.premium, limits=terms.limits_display,
         deductible_all_perils=terms.deductible_all_perils,
         deductible_wind_hail=terms.deductible_wind_hail,
         effective_date=terms.effective_date.isoformat() if terms.effective_date else None,
+        expiration_date=expiration.isoformat() if expiration else None,
+        expiration_date_is_assumed_default=expiration is not None,
     )
 
 
@@ -97,6 +105,7 @@ class BinderIssuancePipeline:
         self._llm = llm
         self._workflow_n = workflow_n
         self._submission_id: str | None = None
+        self._existing_bind_id: str | None = None
         self._as_of: date | None = None
         self._bundle: ScenarioBundle | None = None
         self._parsed_confirmation: ParsedBindConfirmation | None = None
@@ -366,7 +375,14 @@ class BinderIssuancePipeline:
         policy_documents_delivered_fires = self._issued_policy_status == "CLEAN"
 
         payload = BindCoordinationPayload(
-            bind_id=str(uuid4()),
+            # Stable across re-runs once one exists (see run_live_update's
+            # existing_bind_id param) — fresh only on this bind's first-ever
+            # creation. Renewal Remarketing depends on this NOT changing
+            # underneath an already-confirmed bind (confirmed by its own
+            # hand-built test asserting a fixed bind_id), so a live "attach
+            # confirmation"/"attach issued policy" re-run must never mint a
+            # new one.
+            bind_id=self._existing_bind_id or str(uuid4()),
             submission_id=self._submission_id,
             named_insured=self._named_insured,
             carrier_id=self._carrier_id,
@@ -454,6 +470,7 @@ class BinderIssuancePipeline:
         *,
         confirmation_raw_text: str | None = None,
         issued_policy_raw_text: str | None = None,
+        existing_bind_id: str | None = None,
     ) -> OutputPackage:
         """Covers every live moment of this bind's lifecycle from the same
         ``broker_bind_instruction`` shape: initial creation (neither text —
@@ -464,11 +481,18 @@ class BinderIssuancePipeline:
         previously persisted, e.g. via ``live_ingestion.
         load_live_bind_confirmation_text`` — or ``_decide_pre_bind_stage``
         will see ``self._parsed_confirmation is None`` and short-circuit
-        back to ``READY``, per that function's own already-tested logic)."""
+        back to ``READY``, per that function's own already-tested logic).
+
+        ``existing_bind_id``: pass the CURRENT stored ``payload["bind_id"]``
+        on every re-run (attach-confirmation, attach-policy) so it stays
+        stable — Renewal Remarketing keys a real bind by this value across
+        renewal cycles (FR-10), so it must never change just because this
+        bind's own record was updated. Leave unset only on first creation."""
         self._bundle = ScenarioBundle(
             scenario_ref="live", broker_bind_instruction=broker_bind_instruction
         )
         self._submission_id = broker_bind_instruction.get("submission_id")
+        self._existing_bind_id = existing_bind_id
         self._as_of = datetime.now(UTC).date()
 
         documents = []

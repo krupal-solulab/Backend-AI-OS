@@ -21,12 +21,20 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import ReviewAction
 from core.db import get_session
+from core.ingestion.connectors import ConnectorNotConnectedError
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.tenancy.dependencies import get_ctx
 from verticals.es.agent_communication_hooks import fire_endorsement_result
+from verticals.es.workflows.endorsement.live_ingestion import (
+    build_bound_policy_context_from_binder,
+    discover_live_messages,
+    load_live_bound_policy_context,
+    save_live_bound_policy_context,
+    save_live_issued_endorsement,
+)
 from verticals.es.workflows.endorsement.schema import EndorsementRequestPayload
 from verticals.es.workflows.endorsement.service import (
     DEFAULT_WORKFLOW_N,
@@ -59,6 +67,21 @@ class ReviewItemOut(BaseModel):
     submission_id: str | None
     status: str
     payload: EndorsementRequestPayload | None = None
+
+
+class RunLiveFromBinderRequest(BaseModel):
+    binder_issuance_item_id: str
+    change_type: str
+    change_detail: str
+
+
+class LiveInboxMessageOut(BaseModel):
+    id: str
+    subject: str
+
+
+class AttachLiveMessageRequest(BaseModel):
+    message_id: str  # real Gmail message id, picked from /live-inbox
 
 
 async def _item_or_404(item_id: str, ctx: Ctx, session: AsyncSession) -> ReviewItemRow:
@@ -95,6 +118,110 @@ async def run_endorsement(body: RunRequest, ctx: CtxDep, session: SessionDep) ->
     await fire_endorsement_result(
         session, ctx, submission_id=item.submission_id, payload=output.payload
     )
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=EndorsementRequestPayload(**output.payload),
+    )
+
+
+@router.post("/run-live-from-binder", status_code=status.HTTP_201_CREATED)
+async def run_endorsement_from_binder(
+    body: RunLiveFromBinderRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: starts a real pre-issuance pass
+    from an actual, already-SENT Binder & Issuance bind's real terms,
+    instead of a Workflow_15 fixture. The change type/detail are broker-
+    supplied (see ``live_ingestion.py``'s module docstring for why) — never
+    inferred from any raw email text."""
+    context = await build_bound_policy_context_from_binder(
+        session, ctx, body.binder_issuance_item_id, body.change_type, body.change_detail
+    )
+
+    pipeline = _pipeline()
+    output = await pipeline.run_live(ctx, context)
+
+    review_queue = DefaultReviewQueueService()
+    item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+    await save_live_bound_policy_context(session, ctx, item.id, context)
+
+    await fire_endorsement_result(
+        session, ctx, submission_id=item.submission_id, payload=output.payload
+    )
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=EndorsementRequestPayload(**output.payload),
+    )
+
+
+@router.get("/live-inbox")
+async def list_live_inbox(
+    item_id: str, ctx: CtxDep, session: SessionDep
+) -> list[LiveInboxMessageOut]:
+    """Real Gmail messages that could be this request's issued endorsement
+    — matched by the request's own real named insured (see
+    ``live_ingestion.discover_live_messages``, reused from Binder &
+    Issuance's own live-inbox search). Additive alongside ``/run`` above;
+    requires Gmail connected + CONNECTORS_MODE=live."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    named_insured = (pkg.payload or {}).get("named_insured") if pkg else None
+    try:
+        messages = await discover_live_messages(session, ctx, named_insured)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    return [LiveInboxMessageOut(**m) for m in messages]
+
+
+@router.post("/{item_id}/attach-live-issued-endorsement")
+async def attach_live_issued_endorsement(
+    item_id: str, body: AttachLiveMessageRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive alongside ``/run`` above: attaches a REAL carrier-issued-
+    endorsement email to this real live request — runs EP-05's item-level
+    reconciliation for real, instead of a Workflow_15 fixture's
+    ``carrier_issued_endorsement.txt``. Updates this SAME review item in
+    place (no new item created), same direct-mutation technique as
+    ``resolve_discrepancy`` below."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None or pkg.payload is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no endorsement payload for this item")
+    old_payload = pkg.payload
+
+    try:
+        text = await save_live_issued_endorsement(session, ctx, item_id, body.message_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+
+    context = await load_live_bound_policy_context(session, ctx, item_id)
+    if context is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this request's own bound-policy context is missing — it wasn't created via the "
+            "live path",
+        )
+
+    pipeline = _pipeline()
+    output = await pipeline.run_live_update(ctx, context, issued_endorsement_raw_text=text)
+
+    pkg.payload = output.payload
+    session.add(pkg)
+    await session.commit()
+
+    newly_fired = (
+        not old_payload.get("downstream_trigger_fired") and output.payload.get("downstream_trigger_fired")
+    )
+    if newly_fired:
+        await fire_endorsement_result(
+            session, ctx, submission_id=item.submission_id, payload=output.payload
+        )
+
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=EndorsementRequestPayload(**output.payload),

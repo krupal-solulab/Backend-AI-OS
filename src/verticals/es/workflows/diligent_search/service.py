@@ -251,3 +251,29 @@ class DiligentSearchPipeline:
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)
         return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, context: dict[str, Any]) -> OutputPackage:
+        """Additive entry point, alongside ``run()``'s fixture-scenario path
+        above — a real determination built from broker/compliance-supplied
+        per-state facts and declination records for a real, MM-07-seeded
+        submission, instead of a Workflow_17 fixture. ``context`` is shaped
+        ``{submission_id, named_insured, states: [{state, requirement,
+        declinations}]}`` — same per-state dict shape ``determine_state``
+        already takes from the fixture path (see ``ingest()`` above), just
+        sourced from a human instead of ``scenario_loader``. DS-01..DS-04's
+        strict, unmodified logic decides sufficiency/generation exactly as
+        it does today — this method supplies inputs, never a shortcut
+        around the gate."""
+        self._submission_id = context.get("submission_id")
+        self._named_insured = context.get("named_insured")
+        self._determinations = [
+            determine_state(s["state"], s.get("requirement"), s.get("declinations"))
+            for s in context.get("states", [])
+        ]
+        self._overall_status = compute_overall_status(self._determinations)
+
+        raw = RawBundle(submission_id=self._submission_id)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)

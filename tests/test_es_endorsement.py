@@ -11,6 +11,9 @@ verticals/es/workflows/endorsement/eval_test.py for why.
 
 from __future__ import annotations
 
+import base64
+
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -21,19 +24,42 @@ from core.audit import DefaultAuditService
 from core.common.dtos import AuditEntry, Ctx, WorkflowInput
 from core.common.enums import DecisionOutcome, ReviewStatus, Role, Vertical
 from core.config import get_settings
+from core.integrations.repository import upsert_connection
 from core.llm import build_llm_service
 from core.models import Tenant
 from core.review_queue import DefaultReviewQueueService
 from verticals.es.workflows.agent_communication.router import list_agent_communication
+from verticals.es.workflows.binder_issuance.router import (
+    RunFromQuoteRequest,
+    run_binder_issuance_from_quote,
+)
+from verticals.es.workflows.binder_issuance.router import (
+    attach_live_confirmation as attach_live_bind_confirmation,
+)
+from verticals.es.workflows.binder_issuance.router import (
+    AttachLiveMessageRequest as AttachLiveBindConfirmationRequest,
+)
 from verticals.es.workflows.endorsement.router import (
+    AttachLiveMessageRequest,
     ResolveDiscrepancyRequest,
+    RunLiveFromBinderRequest,
     RunRequest,
+    attach_live_issued_endorsement,
     escalate,
+    list_live_inbox,
     resolve_discrepancy,
     run_endorsement,
+    run_endorsement_from_binder,
     send,
 )
 from verticals.es.workflows.endorsement.service import EndorsementPipeline
+from verticals.es.workflows.quote_comparison.router import (
+    RunRequest as QuoteRunRequest,
+)
+from verticals.es.workflows.quote_comparison.router import (
+    run_quote_comparison,
+    select_quote,
+)
 
 pytestmark = pytest.mark.skipif(
     not get_settings().test_data_root,
@@ -236,3 +262,361 @@ async def test_full_pipeline_review_queue_and_audit(es_ctx, es_session) -> None:
     )
     entries = await audit.query(es_session, es_ctx, {"workflow": "endorsement"})
     assert len(entries) == 1
+
+
+# --- Live path: start from a real SENT bind, attach a real issued endorsement -----
+#
+# Unlike the scenario_* tests above (static Workflow_15 fixture), these prove
+# the NEW live path added this session: a real endorsement request started
+# from an ACTUAL, already-SENT Binder & Issuance bind (chained from a real
+# Quote Comparison selection), with the change type/detail broker-supplied
+# (never inferred from raw email text — see live_ingestion.py's module
+# docstring), then a REAL carrier-issued-endorsement email attached — same
+# mocked-Nango-proxy technique as this session's Quote Comparison/Binder &
+# Issuance live tests.
+
+_LIVE_NAMED_INSURED = "Delta Electric Services LLC"
+_LIVE_SUBJECT = f"RE: {_LIVE_NAMED_INSURED} - Endorsement"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _bind_confirmation_gmail_handler(request: httpx.Request) -> httpx.Response:
+    body = (
+        f"We're pleased to confirm your bind on {_LIVE_NAMED_INSURED}.\n\n"
+        "Binder Number: IRO-2027-TEST\n"
+        "Premium: $26,500\n"
+        "General Liability: $1,000,000 / $2,000,000 aggregate\n"
+        "Deductible: $2,500\n"
+        "Effective Date: 09/01/2027\n"
+    )
+    path = request.url.path
+    if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+        return httpx.Response(200, json={"messages": [{"id": "msg-bind-confirmation-1"}]})
+    if path == "/proxy/gmail/v1/users/me/messages/msg-bind-confirmation-1":
+        if request.url.params.get("format") == "metadata":
+            return httpx.Response(
+                200, json={"payload": {"headers": [{"name": "Subject", "value": "BOUND"}]}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "uw@ironcladcasualty.com"},
+                        {"name": "Subject", "value": "BOUND"},
+                        {"name": "Date", "value": "Fri, 30 Jul 2027 16:00:00 -0500"},
+                    ],
+                    "mimeType": "text/plain",
+                    "body": {"data": _b64url(body.encode("utf-8"))},
+                }
+            },
+        )
+    return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+
+def _issued_endorsement_gmail_handler(*, items: list[str]):
+    body = (
+        f"Endorsement issued for {_LIVE_NAMED_INSURED}.\n\n"
+        "Endorsement Number: END-2027-TEST\n"
+        + "".join(f"Added as scheduled additional insured: {item}\n" for item in items)
+        + "Effective Date: 09/01/2027\n"
+        "No additional premium.\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/proxy/gmail/v1/users/me/messages" and request.method == "GET":
+            return httpx.Response(200, json={"messages": [{"id": "msg-issued-endorsement-1"}]})
+        if path == "/proxy/gmail/v1/users/me/messages/msg-issued-endorsement-1":
+            if request.url.params.get("format") == "metadata":
+                return httpx.Response(
+                    200,
+                    json={"payload": {"headers": [{"name": "Subject", "value": _LIVE_SUBJECT}]}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": "uw@ironcladcasualty.com"},
+                            {"name": "Subject", "value": _LIVE_SUBJECT},
+                            {"name": "Date", "value": "Wed, 24 Sep 2027 13:00:00 -0500"},
+                        ],
+                        "mimeType": "text/plain",
+                        "body": {"data": _b64url(body.encode("utf-8"))},
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+    return handler
+
+
+@pytest.fixture
+async def live_gmail_connected(es_ctx, es_session, monkeypatch):
+    """A tenant with Gmail "connected" and CONNECTORS_MODE forced to "live"
+    for this test only — ``get_settings()`` is ``@lru_cache``d, so the cache
+    must be cleared on both sides of the env-var flip (same fix used by this
+    session's Quote Comparison/Binder & Issuance live tests)."""
+    monkeypatch.setenv("CONNECTORS_MODE", "live")
+    get_settings.cache_clear()
+    await upsert_connection(
+        es_session, es_ctx.tenant_id, "google-mail",
+        nango_connection_id="conn-live-ep", status="connected",
+    )
+    yield
+    get_settings.cache_clear()
+
+
+def _patch_gmail(monkeypatch, handler) -> None:
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_ASYNC_CLIENT(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient  # captured once at import time — see
+# test_es_binder_issuance.py's identical fix: a test patching httpx.AsyncClient
+# twice in the same test must always rebuild from the TRUE original.
+
+
+async def _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch):
+    """Chains real Quote Comparison (Ironclad's clean, routine-only
+    scenario_01 quote) -> real Binder & Issuance creation -> a real,
+    mocked-Gmail bind confirmation attach, producing a genuine SENT/CLEAN
+    bind — the only state an endorsement can legitimately start from."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    ironclad_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Ironclad Casualty Solutions"
+    )
+    await select_quote(qc_item.id, ironclad_quote.quote_id, es_ctx, es_session)
+    bind_item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    assert bind_item.payload.bind_order_status == "READY"
+
+    _patch_gmail(monkeypatch, _bind_confirmation_gmail_handler)
+    confirmed = await attach_live_bind_confirmation(
+        bind_item.id,
+        AttachLiveBindConfirmationRequest(message_id="msg-bind-confirmation-1"),
+        es_ctx, es_session,
+    )
+    assert confirmed.payload.bind_order_status == "SENT"
+    assert confirmed.payload.carrier_confirmation.reconciliation_status == "CLEAN"
+    return confirmed
+
+
+async def test_run_live_from_binder_requires_sent_bind(es_ctx, es_session) -> None:
+    """An endorsement only applies to an already-bound policy — starting
+    one from a bind that's still READY (no confirmation yet) must be
+    rejected, not silently proceed on incomplete data."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    ironclad_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Ironclad Casualty Solutions"
+    )
+    await select_quote(qc_item.id, ironclad_quote.quote_id, es_ctx, es_session)
+    bind_item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    assert bind_item.payload.bind_order_status == "READY"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await run_endorsement_from_binder(
+            RunLiveFromBinderRequest(
+                binder_issuance_item_id=bind_item.id,
+                change_type="additional_insured_endorsement",
+                change_detail="Add Riverside Fabrication Co. as additional insured",
+            ),
+            es_ctx, es_session,
+        )
+    assert exc_info.value.status_code == 409
+
+
+async def test_run_live_from_binder_uses_real_bind_terms(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="additional_insured_endorsement",
+            change_detail="Add Riverside Fabrication Co. as additional insured",
+        ),
+        es_ctx, es_session,
+    )
+    payload = ep_item.payload
+    assert payload.named_insured == _LIVE_NAMED_INSURED
+    assert payload.carrier_name == "Ironclad Casualty Solutions"
+    # bind_id is Binder & Issuance's OWN stable bind_id (payload["bind_id"]),
+    # NOT this binder-issuance review item's own id — a real bug found and
+    # fixed this pass: Renewal Remarketing cross-references endorsement
+    # history by this exact value, which only works if both sides agree.
+    assert payload.bind_id == bind_item.payload.bind_id
+    assert payload.bind_id != bind_item.id
+    assert payload.classification == "ROUTINE"  # additional_insured is ALWAYS_ROUTINE_TYPES
+    assert payload.appetite_recheck.outcome == "NOT_APPLICABLE"  # doesn't touch appetite-types
+    assert payload.requested_items == ["Riverside Fabrication Co."]
+
+
+async def test_run_live_from_binder_carries_real_expiration_date(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Gap-fill bonus fix: Binder & Issuance's real (assumed-default)
+    expiration_date now flows into current_terms, unblocking proration
+    logic that was already written but previously silently no-op'd for
+    every real live endorsement (it only ever checked for a key that
+    never existed)."""
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="limit_increase",
+            change_detail=(
+                "Increase General Liability limits to $2,000,000/$4,000,000, "
+                "effective 10/01/2027"
+            ),
+        ),
+        es_ctx, es_session,
+    )
+    proration = ep_item.payload.premium_impact.proration_inputs
+    assert proration is not None  # previously always None for every real live bind
+    assert proration.term_total_days == 365
+
+
+async def test_run_live_from_binder_plumbs_real_headcount_percent_change(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Gap-fill: classify()'s already-computed percent_change/absolute_change
+    for a material employee_count_update endorsement — previously computed
+    and immediately discarded — now reaches the output payload, where
+    Renewal Remarketing's RR-01 reads it as a real exposure-change signal."""
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="employee_count_update",
+            change_detail="Headcount growth from 50 to 81 employees",
+        ),
+        es_ctx, es_session,
+    )
+    payload = ep_item.payload
+    assert payload.classification == "UNDERWRITING_REVIEW_REQUIRED"
+    assert payload.requested_change.percent_change == 62.0
+    assert payload.requested_change.absolute_change == 31.0
+
+
+async def test_live_inbox_discovers_real_candidate_messages(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="additional_insured_endorsement",
+            change_detail="Add Riverside Fabrication Co. as additional insured",
+        ),
+        es_ctx, es_session,
+    )
+
+    _patch_gmail(monkeypatch, _issued_endorsement_gmail_handler(items=["Riverside Fabrication Co."]))
+    messages = await list_live_inbox(ep_item.id, es_ctx, es_session)
+    assert {m.id for m in messages} == {"msg-issued-endorsement-1"}
+
+
+async def test_attach_live_issued_endorsement_clean_fires_trigger(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="additional_insured_endorsement",
+            change_detail="Add Riverside Fabrication Co. as additional insured",
+        ),
+        es_ctx, es_session,
+    )
+    before = await list_agent_communication(es_ctx, es_session)
+
+    _patch_gmail(monkeypatch, _issued_endorsement_gmail_handler(items=["Riverside Fabrication Co."]))
+    updated = await attach_live_issued_endorsement(
+        ep_item.id, AttachLiveMessageRequest(message_id="msg-issued-endorsement-1"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.carrier_response.reconciliation_status == "CLEAN"
+    assert payload.carrier_response.endorsement_number == "END-2027-TEST"
+    assert payload.downstream_trigger_fired is True
+
+    after = await list_agent_communication(es_ctx, es_session)
+    assert len(after) == len(before) + 1
+
+
+async def test_attach_live_issued_endorsement_flags_partial_discrepancy(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Requesting two additional insureds but the carrier's issued
+    endorsement only confirms one — EP-05's item-level check must flag
+    this as a partial fulfillment, never a false-clean reconciliation."""
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="additional_insured_endorsement",
+            change_detail=(
+                "Add BOTH Midstate Distribution Co. AND Harborline Logistics as scheduled "
+                "additional insureds"
+            ),
+        ),
+        es_ctx, es_session,
+    )
+    assert ep_item.payload.requested_items == ["Midstate Distribution Co.", "Harborline Logistics"]
+    before = await list_agent_communication(es_ctx, es_session)
+
+    _patch_gmail(monkeypatch, _issued_endorsement_gmail_handler(items=["Midstate Distribution Co."]))
+    updated = await attach_live_issued_endorsement(
+        ep_item.id, AttachLiveMessageRequest(message_id="msg-issued-endorsement-1"), es_ctx, es_session
+    )
+    payload = updated.payload
+    assert payload.carrier_response.reconciliation_status == "DISCREPANCY_FLAGGED"
+    missing = [d.requested_item for d in payload.carrier_response.discrepancy_detail]
+    assert missing == ["Harborline Logistics"]
+    assert payload.downstream_trigger_fired is False
+
+    after = await list_agent_communication(es_ctx, es_session)
+    assert len(after) == len(before)  # never fires on an unresolved discrepancy
+
+
+async def test_attach_live_issued_endorsement_never_refires_trigger(
+    es_ctx, es_session, live_gmail_connected, monkeypatch
+) -> None:
+    """Regression guard: re-attaching (e.g. the broker re-picks the same
+    email) after it's already CLEAN must not fire a second
+    ENDORSEMENT_CONFIRMED draft."""
+    bind_item = await _sent_ironclad_bind_item(es_ctx, es_session, monkeypatch)
+    ep_item = await run_endorsement_from_binder(
+        RunLiveFromBinderRequest(
+            binder_issuance_item_id=bind_item.id,
+            change_type="additional_insured_endorsement",
+            change_detail="Add Riverside Fabrication Co. as additional insured",
+        ),
+        es_ctx, es_session,
+    )
+    _patch_gmail(monkeypatch, _issued_endorsement_gmail_handler(items=["Riverside Fabrication Co."]))
+    await attach_live_issued_endorsement(
+        ep_item.id, AttachLiveMessageRequest(message_id="msg-issued-endorsement-1"), es_ctx, es_session
+    )
+    after_first = await list_agent_communication(es_ctx, es_session)
+
+    await attach_live_issued_endorsement(
+        ep_item.id, AttachLiveMessageRequest(message_id="msg-issued-endorsement-1"), es_ctx, es_session
+    )
+    after_second = await list_agent_communication(es_ctx, es_session)
+    assert len(after_second) == len(after_first)

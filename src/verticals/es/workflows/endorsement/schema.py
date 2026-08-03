@@ -16,6 +16,13 @@ class RequestedChangeOut(BaseModel):
     type: str
     detail: str
     requested_effective_date: str | None = None
+    # Real, already-computed by classification_engine.py's classify() for
+    # employee_count_update changes — previously computed and immediately
+    # discarded rather than surfaced. Renewal Remarketing's RR-01 reads this
+    # as a real exposure-change signal instead of a hardcoded 0.0. None for
+    # every other change type (no comparable numeric signal exists there).
+    percent_change: float | None = None
+    absolute_change: float | None = None
 
 
 class AppetiteRecheckOut(BaseModel):

@@ -14,6 +14,14 @@ class BindTermsOut(BaseModel):
     deductible_all_perils: float | None = None
     deductible_wind_hail: float | None = None
     effective_date: str | None = None
+    # No source document (bind confirmation email or issued policy
+    # declarations page) ever states an expiration date or policy term —
+    # confirmed against every real sample in this dataset. Derived as a
+    # standard 12-month term from effective_date and always flagged as an
+    # assumed default, same treatment as policy_issuance's
+    # timeline_is_assumed_default below.
+    expiration_date: str | None = None
+    expiration_date_is_assumed_default: bool = False
 
 
 class SubjectivityOut(BaseModel):

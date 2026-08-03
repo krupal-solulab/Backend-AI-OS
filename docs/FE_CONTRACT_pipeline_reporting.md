@@ -143,12 +143,22 @@ than silently dropped from the report.
 | Savings figure (only when genuinely quantified) | `remarketing_value[].savings_amount` |
 
 ## Known v1 simplifications
-- **No live cross-workflow DB aggregation.** Every scenario's
-  `underlying_data.json` is itself a pre-aggregated period snapshot —
-  nothing in this fixture-driven codebase has produced real "Q3 2027"
-  activity to query. A live `ReviewItem`/`AuditEntry` aggregator across
-  all six prior workflows is real, valuable future scope, not something
-  this pass builds or can validate against these scenarios.
+- **Live cross-workflow DB aggregation now exists** (`live_aggregator.py`,
+  `service.py`'s `run_live`, `POST /run-live`) — builds a real report from
+  actual `OutputPackage` rows across Market Matching, Package Assembly,
+  Quote Comparison, Binder Issuance, and Renewal Remarketing for the
+  tenant, always with `period = "Live (current data)"`. It does not read
+  Retail Agent Communication or Endorsement Processing (neither has a
+  funnel/carrier signal the aggregator currently uses). A real carrier-
+  switch decision is required for `remarketing_value[].savings_amount` to
+  ever be populated — since no workflow in this codebase currently
+  records one, every live report's remarket outcomes honestly resolve to
+  `confirmation_value`/`not_remarketed`, never a guessed figure.
+- **PR-03 (time-to-placement, FR-4) is not built at all** — no field in
+  `schema.py`, no logic in `reporting_engine.py` or `live_aggregator.py`.
+  Unlike PR-04 below, this isn't a documented, deliberate deferral — it's
+  a genuinely unbuilt requirement from the PRD, flagged here rather than
+  left silently missing.
 - **PR-04 (revenue attribution) is fully out of scope** — no field
   anywhere in this schema, per the PRD's own "do not build this rule
   from assumption."

@@ -23,6 +23,14 @@ Honest limitations, by design, not oversight:
   consistently across Package Assembly / Quote Comparison / Binder
   Issuance's real payloads (none of them reliably carry the same
   ``carrier_id`` for a given carrier).
+- Time-to-placement (PR-03) reports RAW elapsed time (earliest real Market
+  Matching row for a submission_id -> the real Binder Issuance row where a
+  ``carrier_confirmation.binder_number`` is actually set) — never a
+  fabricated one. FR-4's broker/agent-delay exclusion is NOT computed:
+  Package Assembly only stores a submission's CURRENT status, never a
+  history of when it entered/left BLOCKED, so there is no real data
+  anywhere to measure that exclusion duration from (see
+  ``TimeToPlacementOut`` in schema.py).
 """
 
 from __future__ import annotations
@@ -47,6 +55,18 @@ async def _payloads_for(session: AsyncSession, ctx: Ctx, workflow: str) -> list[
         )
     ).scalars().all()
     return [r.payload for r in rows if r.payload]
+
+
+async def _rows_for(session: AsyncSession, ctx: Ctx, workflow: str) -> list[OutputPackageRow]:
+    rows = (
+        await session.execute(
+            select(OutputPackageRow).where(
+                col(OutputPackageRow.tenant_id) == ctx.tenant_id,
+                col(OutputPackageRow.workflow) == workflow,
+            )
+        )
+    ).scalars().all()
+    return [r for r in rows if r.payload]
 
 
 def _build_funnel_data(
@@ -114,6 +134,41 @@ def _build_carrier_activity(
     ]
 
 
+def _build_time_to_placement_data(
+    mm_rows: list[OutputPackageRow], bi_rows: list[OutputPackageRow]
+) -> list[dict[str, Any]]:
+    """PR-03: raw elapsed time from a submission's earliest real Market
+    Matching row to the real Binder Issuance row where it was actually
+    bound (a real ``carrier_confirmation.binder_number`` on file) — joined
+    by ``submission_id``, the same real join key ``_build_funnel_data``
+    already relies on across these same workflows. FR-4's delay exclusion
+    is NOT applied — see this module's docstring."""
+    matched_at: dict[str, Any] = {}
+    for r in mm_rows:
+        sub_id = (r.payload or {}).get("submission_id")
+        if not sub_id:
+            continue
+        if sub_id not in matched_at or r.created_at < matched_at[sub_id]:
+            matched_at[sub_id] = r.created_at
+
+    placements: list[dict[str, Any]] = []
+    for r in bi_rows:
+        payload = r.payload or {}
+        sub_id = payload.get("submission_id")
+        carrier_name = payload.get("carrier_name")
+        binder_number = (payload.get("carrier_confirmation") or {}).get("binder_number")
+        if not sub_id or not carrier_name or not binder_number:
+            continue
+        start = matched_at.get(sub_id)
+        if start is None:
+            continue
+        days = (r.created_at.date() - start.date()).days
+        if days < 0:
+            continue  # out-of-order/clock-skew data — never report a negative elapsed time
+        placements.append({"carrier_name": carrier_name, "days": days})
+    return placements
+
+
 def _build_remarket_outcomes(rr_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_account: dict[str, dict[str, Any]] = {}
     for r in rr_rows:
@@ -161,14 +216,17 @@ async def build_live_underlying_data(session: AsyncSession, ctx: Ctx) -> dict[st
     Unlike a single fixture scenario (which always exercises exactly one
     report "kind"), this returns funnel + carrier + remarketing data all at
     once — genuinely everything logged so far for this tenant."""
-    mm_rows = await _payloads_for(session, ctx, "market_matching")
+    mm_rows_raw = await _rows_for(session, ctx, "market_matching")
+    bi_rows_raw = await _rows_for(session, ctx, "binder_issuance")
+    mm_rows = [r.payload for r in mm_rows_raw]
     pa_rows = await _payloads_for(session, ctx, "package_assembly")
     qc_rows = await _payloads_for(session, ctx, "quote_comparison")
-    bi_rows = await _payloads_for(session, ctx, "binder_issuance")
+    bi_rows = [r.payload for r in bi_rows_raw]
     rr_rows = await _payloads_for(session, ctx, "renewal_remarketing")
 
     return {
         **_build_funnel_data(mm_rows, pa_rows, qc_rows, bi_rows),
         "carrier_activity": _build_carrier_activity(pa_rows, qc_rows, bi_rows),
+        "placements": _build_time_to_placement_data(mm_rows_raw, bi_rows_raw),
         "remarket_outcomes": _build_remarket_outcomes(rr_rows),
     }

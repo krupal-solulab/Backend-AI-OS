@@ -7,15 +7,25 @@ RR-05's Market Matching re-invocation lives here, at
 action, not automatic inside ``/run`` (per the PRD's own §4 step 6b: "broker
 approves initiating a remarket, which re-invokes Market Matching").
 
-**Known v1 limitation, stated plainly, not hidden:** this genuinely
-re-invokes ``MarketMatchingPipeline.run()`` (satisfying FR-12's "direct
-re-invocation... not separately-built ranking logic") against the ORIGINAL
-Workflow_10 submission fixture for the same named insured — this dataset
-ships no fresh renewal-time ACORD/loss-run documents, so the re-invocation
-reflects original bind-time exposure data, not the updated figures
-described in this workflow's own ``renewal_context.json``. A true "current
-profile" re-extraction would need fresh renewal-time documents this
-dataset doesn't model.
+**Formerly a known v1 limitation, now fixed for the live path:**
+``initiate-remarket`` used to always re-invoke ``MarketMatchingPipeline.run()``
+against the Workflow_10 FIXTURE for the same named insured, even when the
+review item itself was real. Now it accepts an optional real
+``message_id`` (picked from ``/live-inbox``, same discovery search as every
+other live-inbox picker this vertical uses) — when supplied,
+``MarketMatchingPipeline.run()`` runs against that REAL message
+(``build_connector_service`` already switches to the live connector
+automatically), a genuine "current profile" re-extraction, not stale
+bind-time fixture data. Omitting ``message_id`` keeps the exact original
+fixture-fallback behavior, unchanged, for backward compatibility.
+
+RR-06's comparison stage (incumbent renewal offer vs. a remarketed
+alternative) is also now live: ``/{item_id}/run-live-comparison`` parses a
+real incumbent-offer email (``incumbent_offer_parser.py``) against a real,
+already-selected Quote Comparison quote for the same account
+(``live_ingestion.find_live_alternative_quote``) — see that module for why
+reusing Quote Comparison's own real output, rather than inventing a second
+live-ingestion path for "the alternative," is the right design.
 """
 
 from __future__ import annotations
@@ -34,7 +44,7 @@ from core.common.dtos import AuditEntry, Ctx, RawBundle, RawDocument, WorkflowIn
 from core.common.enums import ReviewAction, Vertical
 from core.db import get_session
 from core.extraction import DefaultExtractionService
-from core.ingestion.connectors import build_connector_service
+from core.ingestion.connectors import ConnectorNotConnectedError, build_connector_service
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
@@ -42,7 +52,15 @@ from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
 from core.tenancy.dependencies import get_ctx
 from verticals.es.workflows.market_matching.service import MarketMatchingPipeline
-from verticals.es.workflows.renewal_remarketing.live_ingestion import discover_live_binds
+from verticals.es.workflows.renewal_remarketing.incumbent_offer_parser import (
+    parse_incumbent_renewal_offer,
+)
+from verticals.es.workflows.renewal_remarketing.live_ingestion import (
+    discover_live_binds,
+    discover_live_messages,
+    find_live_alternative_quote,
+    save_live_incumbent_offer,
+)
 from verticals.es.workflows.renewal_remarketing.schema import RemarketDecisionPayload
 from verticals.es.workflows.renewal_remarketing.service import (
     DEFAULT_WORKFLOW_N,
@@ -108,6 +126,29 @@ class LiveBindOut(BaseModel):
     carrier_name: str | None = None
 
 
+class LiveInboxMessageOut(BaseModel):
+    id: str
+    subject: str
+
+
+class LiveAlternativeQuoteOut(BaseModel):
+    quote_comparison_item_id: str
+    carrier_name: str
+    premium: float | None = None
+    limits: str | None = None
+
+
+class InitiateRemarketRequest(BaseModel):
+    # Real Gmail message id, picked from /live-inbox — omit to keep the
+    # original Workflow_10 fixture-matching behavior unchanged.
+    message_id: str | None = None
+
+
+class RunLiveComparisonRequest(BaseModel):
+    message_id: str  # the incumbent's real renewal-offer email
+    quote_comparison_item_id: str  # a real, already-selected Quote Comparison item
+
+
 class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
@@ -163,6 +204,81 @@ async def list_live_binds(ctx: CtxDep, session: SessionDep) -> list[LiveBindOut]
     return [LiveBindOut(**b) for b in binds]
 
 
+@router.get("/live-inbox")
+async def list_live_inbox(
+    item_id: str, ctx: CtxDep, session: SessionDep
+) -> list[LiveInboxMessageOut]:
+    """Real Gmail messages for this item's real named insured — reused for
+    both re-shop-candidate discovery (feeding ``initiate-remarket``'s
+    optional ``message_id``) and incumbent-offer discovery (feeding
+    ``run-live-comparison``); same underlying search either way, the broker
+    picks based on subject. Additive; requires Gmail connected +
+    CONNECTORS_MODE=live."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    named_insured = (pkg.payload or {}).get("named_insured") if pkg else None
+    try:
+        messages = await discover_live_messages(session, ctx, named_insured)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    return [LiveInboxMessageOut(**m) for m in messages]
+
+
+@router.get("/live-alternative-quotes")
+async def list_live_alternative_quotes(
+    item_id: str, ctx: CtxDep, session: SessionDep
+) -> list[LiveAlternativeQuoteOut]:
+    """Real, already-selected Quote Comparison items for this item's real
+    named insured — the "alternative" side of RR-06's comparison, for the
+    ``run-live-comparison`` picker. See ``live_ingestion.
+    find_live_alternative_quote``'s docstring for why this reuses Quote
+    Comparison's own real output rather than a second live-ingestion path."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    named_insured = (pkg.payload or {}).get("named_insured") if pkg else None
+    if not named_insured:
+        return []
+    # Joined via ReviewItemRow (not a bare OutputPackageRow scan) so the id
+    # returned is the one /api/es/quote-comparison/{item_id} actually
+    # expects — the STABLE review item id, not the internal output-package
+    # row id, same distinction the bind_id fix above is about.
+    qc_items = (
+        await session.execute(
+            select(ReviewItemRow).where(
+                col(ReviewItemRow.tenant_id) == ctx.tenant_id,
+                col(ReviewItemRow.workflow) == "quote_comparison",
+            )
+        )
+    ).scalars().all()
+    out = []
+    for qc_item in qc_items:
+        if not qc_item.output_package_id:
+            continue
+        row = (
+            await session.execute(
+                select(OutputPackageRow).where(
+                    col(OutputPackageRow.id) == qc_item.output_package_id
+                )
+            )
+        ).scalar_one_or_none()
+        p = row.payload if row and row.payload else {}
+        if p.get("named_insured") != named_insured or not p.get("selected_quote_id"):
+            continue
+        quote = next(
+            (q for q in p.get("quotes", []) if q.get("quote_id") == p["selected_quote_id"]), None
+        )
+        if quote is None:
+            continue
+        out.append(LiveAlternativeQuoteOut(
+            quote_comparison_item_id=qc_item.id, carrier_name=quote.get("carrier_name", ""),
+            premium=quote.get("premium"), limits=quote.get("limits"),
+        ))
+    return out
+
+
 @router.post("/run-live", status_code=status.HTTP_201_CREATED)
 async def run_renewal_remarketing_live(
     body: RunLiveRequest, ctx: CtxDep, session: SessionDep
@@ -208,11 +324,15 @@ async def get_renewal_remarketing(item_id: str, ctx: CtxDep, session: SessionDep
 
 
 @router.post("/{item_id}/initiate-remarket")
-async def initiate_remarket(item_id: str, ctx: CtxDep, session: SessionDep) -> ReviewItemOut:
+async def initiate_remarket(
+    item_id: str, ctx: CtxDep, session: SessionDep, body: InitiateRemarketRequest | None = None,
+) -> ReviewItemOut:
     """FR-16: "Approve light check" / "Approve full remarket" — both use
     this same action; the level distinction is already in the trigger
-    decision, not the action itself. See module docstring for the known
-    bind-time-data limitation."""
+    decision, not the action itself. Pass a real ``message_id`` (from
+    ``/live-inbox``) to re-invoke Market Matching against a genuine current
+    document instead of the Workflow_10 fixture fallback — see module
+    docstring."""
     item = await _item_or_404(item_id, ctx, session)
     pkg = await _pkg_row_for(session, item)
     if pkg is None or pkg.payload is None:
@@ -226,8 +346,12 @@ async def initiate_remarket(item_id: str, ctx: CtxDep, session: SessionDep) -> R
             "NO_REMARKET decisions don't initiate a remarket — use accept-incumbent instead",
         )
 
-    named_insured = payload.get("named_insured") or ""
-    submission_ref = await _resolve_workflow10_submission_ref(ctx, named_insured)
+    message_id = body.message_id if body else None
+    if message_id:
+        submission_ref: str | None = message_id
+    else:
+        named_insured = payload.get("named_insured") or ""
+        submission_ref = await _resolve_workflow10_submission_ref(ctx, named_insured)
     market_matching_item_id = None
     if submission_ref:
         mm_pipeline = MarketMatchingPipeline(
@@ -265,6 +389,69 @@ async def initiate_remarket(item_id: str, ctx: CtxDep, session: SessionDep) -> R
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=RemarketDecisionPayload(**payload),
+    )
+
+
+@router.post("/{item_id}/run-live-comparison", status_code=status.HTTP_201_CREATED)
+async def run_renewal_remarketing_live_comparison(
+    item_id: str, body: RunLiveComparisonRequest, ctx: CtxDep, session: SessionDep,
+) -> ReviewItemOut:
+    """RR-06, live: a real incumbent-offer email against a real, already-
+    selected Quote Comparison quote — instead of Workflow_16's Scenario 05
+    fixture. ``item_id`` is the TRIGGER-stage review (read-only here, never
+    mutated) — a comparison only makes sense once a remarket was actually
+    approved, matching the fixture's own precedent of Scenario 05 being a
+    wholly separate scenario/review item from Scenario 02, not an in-place
+    update of it."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None or pkg.payload is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no remarket payload for this item")
+    trigger_payload = pkg.payload
+    if not (trigger_payload.get("remarket_execution") or {}).get("initiated"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "no remarket has been initiated for this review yet — approve one first",
+        )
+
+    try:
+        offer_text = await save_live_incumbent_offer(session, ctx, item_id, body.message_id)
+    except ConnectorNotConnectedError as exc:
+        raise HTTPException(
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            f"Connect Gmail in Settings first ({exc.provider} not connected)",
+        ) from exc
+    parsed_offer = parse_incumbent_renewal_offer(offer_text)
+
+    alternative = await find_live_alternative_quote(
+        session, ctx, trigger_payload.get("named_insured")
+    )
+    if alternative is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "no selected Quote Comparison quote found for this named insured yet",
+        )
+
+    context = {
+        "bind_id": trigger_payload.get("bind_id"),
+        "named_insured": trigger_payload.get("named_insured"),
+        "incumbent_carrier_id": trigger_payload.get("incumbent_carrier_id"),
+        "incumbent_carrier_name": trigger_payload.get("incumbent_carrier_name", ""),
+        "incumbent_renewal_offer": {
+            "premium": parsed_offer.premium,
+            "limits": parsed_offer.limits,
+            "deductible": parsed_offer.deductible,
+        },
+        "alternative_quote_received": alternative,
+    }
+    pipeline = _pipeline()
+    output = await pipeline.run_live_comparison(ctx, context)
+
+    review_queue = DefaultReviewQueueService()
+    new_item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
+    return ReviewItemOut(
+        id=new_item.id, submission_id=new_item.submission_id, status=new_item.status.value,
+        payload=RemarketDecisionPayload(**output.payload),
     )
 
 

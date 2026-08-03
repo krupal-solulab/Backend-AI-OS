@@ -296,8 +296,14 @@ class RenewalRemarketingPipeline:
         above — a real trigger-stage review built from an ACTUAL Binder
         Issuance bind + real Endorsement Processing history for it, instead
         of a Workflow_16 fixture. See ``live_ingestion.py`` for the exact
-        real fields and its honest limitations (no real exposure %, loss
-        history, or incumbent-offer data exists anywhere in this codebase)."""
+        real fields: exposure-change % (from a real material Endorsement
+        Processing record, when one exists), incumbent-offer arrival/non-
+        response (from a real inbox check against a real, assumed-default
+        expiration date), and remarketing history (from this workflow's own
+        real prior cycles) are now genuinely real. Loss history remains the
+        one honest gap — no claims/loss-run workflow exists anywhere in this
+        codebase, so ``FULL_REMARKET`` (which requires a real adverse loss
+        trend) stays unreachable from pure live data."""
         context = await build_live_renewal_context(session, ctx, bind_id)
         self._context = context
         self._bind_id = context.get("bind_id")
@@ -305,6 +311,31 @@ class RenewalRemarketingPipeline:
         self._incumbent_carrier_id = context.get("incumbent_carrier_id")
         self._incumbent_carrier_name = context.get("incumbent_carrier_name", "")
         self._is_comparison_stage = False
+
+        raw = RawBundle(submission_id=self._bind_id)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live_comparison(self, ctx: Ctx, context: dict[str, Any]) -> OutputPackage:
+        """Additive entry point for RR-06's comparison stage — a real
+        incumbent-renewal-offer email (parsed via ``incumbent_offer_parser.
+        parse_incumbent_renewal_offer``) against a real, already-selected
+        Quote Comparison quote (``live_ingestion.find_live_alternative_
+        quote``), instead of Workflow_16's Scenario 05 fixture. ``context``
+        is shaped exactly like ``alternative_quote_received``-bearing
+        fixture data (``bind_id``, ``named_insured``, ``incumbent_carrier_
+        id/name``, ``incumbent_renewal_offer``, ``alternative_quote_
+        received``) — no persistence of the original trigger-stage context
+        needed here, since ``compare_renewal_options`` only ever reads the
+        two offers themselves, confirmed by its own signature."""
+        self._context = context
+        self._bind_id = context.get("bind_id")
+        self._named_insured = context.get("named_insured")
+        self._incumbent_carrier_id = context.get("incumbent_carrier_id")
+        self._incumbent_carrier_name = context.get("incumbent_carrier_name", "")
+        self._is_comparison_stage = True
 
         raw = RawBundle(submission_id=self._bind_id)
         data = await self.extract(ctx, raw)

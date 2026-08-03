@@ -14,6 +14,8 @@ Scenario 04 proves a $0-savings confirmation never reads as a failure.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -250,3 +252,47 @@ async def test_run_live_aggregates_real_cross_workflow_rows(es_ctx, es_session) 
     # produces confirmation_value, never a guessed savings figure.
     assert outcome.outcome_type == "confirmation_value"
     assert outcome.savings_amount is None
+
+
+async def test_run_live_time_to_placement_is_raw_elapsed_days(es_ctx, es_session) -> None:
+    """Gap-fill (PR-03/FR-4): real elapsed time from a submission's
+    earliest Market Matching row to its Binder Issuance bind, per carrier
+    — joined by submission_id, the same real join key funnel counting
+    already relies on. FR-4's broker/agent-delay exclusion is honestly
+    NOT applied (Package Assembly has no history of BLOCKED-status
+    duration to compute it from) — this proves the raw elapsed-day math
+    itself is correct and grounded in real timestamps, never fabricated."""
+    matched_at = datetime(2027, 6, 1, 12, 0, tzinfo=UTC)
+    bound_at = matched_at + timedelta(days=14)
+
+    rows = [
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-T1", workflow="market_matching",
+            created_at=matched_at,
+            payload={
+                "submission_id": "SUB-T1",
+                "matches": [{"carrier_id": "CAR-IC", "carrier_name": "Ironclad", "score": 82.0}],
+                "excluded": [],
+                "diligent_search": {"required": False, "on_file": 0, "compliant": True, "note": "n/a"},
+            },
+        ),
+        OutputPackageRow(
+            tenant_id=es_ctx.tenant_id, submission_id="SUB-T1", workflow="binder_issuance",
+            created_at=bound_at,
+            payload={
+                "bind_id": "BIND-T1", "submission_id": "SUB-T1", "carrier_id": "CAR-IC",
+                "carrier_name": "Ironclad", "requested_bind_terms": {},
+                "carrier_confirmation": {"binder_number": "BINDER-T1"},
+            },
+        ),
+    ]
+    es_session.add_all(rows)
+    await es_session.commit()
+
+    item = await run_pipeline_reporting_live(es_ctx, es_session)
+    payload = item.payload
+
+    placement = next(p for p in payload.time_to_placement if p.carrier_name == "Ironclad")
+    assert placement.submissions_bound == 1
+    assert placement.avg_days == 14.0
+    assert placement.delay_excluded is False  # honest — FR-4's exclusion is not computed

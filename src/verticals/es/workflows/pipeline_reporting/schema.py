@@ -58,6 +58,22 @@ class RemarketOutcomeOut(BaseModel):
     note: str | None = None
 
 
+class TimeToPlacementOut(BaseModel):
+    """PR-03. ``avg_days`` is RAW elapsed time (submission matched -> bound)
+    — FR-4's broker/agent-side delay exclusion is NOT computed here.
+    Package Assembly only stores a submission's CURRENT status, never a
+    history of when it entered/left BLOCKED, so there is no real data
+    anywhere to measure that exclusion duration from. This is disclosed
+    explicitly (``delay_excluded=False``, always, for now), never silently
+    presented as if FR-4's exclusion had been applied."""
+
+    carrier_name: str
+    submissions_bound: int
+    avg_days: float
+    low_volume_flag: bool = False
+    delay_excluded: bool = False
+
+
 class PipelineReportPayload(BaseModel):
     report_id: str
     period: str
@@ -65,4 +81,5 @@ class PipelineReportPayload(BaseModel):
     funnel: list[FunnelStageOut] = []
     overall_conversion_pct: float | None = None
     carrier_performance: list[CarrierPerformanceOut] = []
+    time_to_placement: list[TimeToPlacementOut] = []
     remarketing_value: list[RemarketOutcomeOut] = []

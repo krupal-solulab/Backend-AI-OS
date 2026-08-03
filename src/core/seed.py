@@ -1,9 +1,13 @@
 """Dev seed script — inserts demo tenants + users so the header-stub auth and the
 vertical lookup work immediately in dev.
 
-Creates (idempotently):
+Creates (idempotently, checked per-user so re-running after adding new users
+to `_USERS` below still seeds the new ones even though the tenant already
+exists):
   - Tenant "demo-mga"  (vertical MGA) with a junior + a senior user
-  - Tenant "demo-es"   (vertical ES)  with a junior + a senior user
+  - Tenant "demo-es"   (vertical ES)  with a junior + a senior user, plus
+    two real-email login users for the email-based-role login feature
+    (``manager.j@gmail.com`` -> junior, ``manager.s@gmail.com`` -> senior)
 
 Run (from the repo root, with the venv active):
     python -m core.seed          # if src is on PYTHONPATH
@@ -32,6 +36,17 @@ _TENANTS = [
     ("demo-es", "Demo E&S Brokerage", Vertical.ES),
 ]
 
+_USERS = [
+    ("demo-mga", "demo-mga-junior", "junior@demo-mga.example", "Demo Junior", Role.JUNIOR),
+    ("demo-mga", "demo-mga-senior", "senior@demo-mga.example", "Demo Senior", Role.SENIOR),
+    ("demo-es", "demo-es-junior", "junior@demo-es.example", "Demo Junior", Role.JUNIOR),
+    ("demo-es", "demo-es-senior", "senior@demo-es.example", "Demo Senior", Role.SENIOR),
+    # Real-email login users (email-based-role login feature) — the email
+    # itself is what determines the role, per the login endpoint's lookup.
+    ("demo-es", "demo-es-manager-j", "manager.j@gmail.com", "Manager J", Role.JUNIOR),
+    ("demo-es", "demo-es-manager-s", "manager.s@gmail.com", "Manager S", Role.SENIOR),
+]
+
 
 async def seed() -> None:
     async with async_session_factory() as session:
@@ -39,31 +54,26 @@ async def seed() -> None:
             existing = (
                 await session.execute(select(Tenant).where(col(Tenant.id) == tenant_id))
             ).scalar_one_or_none()
-            if existing is not None:
+            if existing is None:
+                session.add(Tenant(id=tenant_id, name=name, vertical=vertical))
+                print(f"+ seeded tenant '{tenant_id}' ({vertical})")
+            else:
                 print(f"= tenant '{tenant_id}' already exists, skipping")
-                continue
+        await session.commit()
 
-            session.add(Tenant(id=tenant_id, name=name, vertical=vertical))
-            session.add_all(
-                [
+        for tenant_id, user_id, email, display_name, role in _USERS:
+            existing_user = (
+                await session.execute(select(User).where(col(User.id) == user_id))
+            ).scalar_one_or_none()
+            if existing_user is None:
+                session.add(
                     User(
-                        id=f"{tenant_id}-junior",
-                        tenant_id=tenant_id,
-                        email=f"junior@{tenant_id}.example",
-                        name="Demo Junior",
-                        role=Role.JUNIOR,
-                    ),
-                    User(
-                        id=f"{tenant_id}-senior",
-                        tenant_id=tenant_id,
-                        email=f"senior@{tenant_id}.example",
-                        name="Demo Senior",
-                        role=Role.SENIOR,
-                    ),
-                ]
-            )
-            print(f"+ seeded tenant '{tenant_id}' ({vertical}) with junior + senior users")
-
+                        id=user_id, tenant_id=tenant_id, email=email, name=display_name, role=role
+                    )
+                )
+                print(f"+ seeded user '{email}' ({role.value}) for tenant '{tenant_id}'")
+            else:
+                print(f"= user '{email}' already exists, skipping")
         await session.commit()
     print("Seed complete.")
 

@@ -235,7 +235,10 @@ async def attach_live_confirmation(
 
     instruction = instruction_from_stored_payload(old_payload)
     pipeline = _pipeline()
-    output = await pipeline.run_live_update(ctx, instruction, confirmation_raw_text=text)
+    output = await pipeline.run_live_update(
+        ctx, instruction, confirmation_raw_text=text,
+        existing_bind_id=old_payload.get("bind_id"),
+    )
 
     pkg.payload = output.payload
     session.add(pkg)
@@ -287,6 +290,7 @@ async def attach_live_policy(
     output = await pipeline.run_live_update(
         ctx, instruction,
         confirmation_raw_text=confirmation_text, issued_policy_raw_text=policy_text,
+        existing_bind_id=old_payload.get("bind_id"),
     )
 
     pkg.payload = output.payload

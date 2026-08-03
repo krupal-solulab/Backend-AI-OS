@@ -6,13 +6,10 @@ aggregation/reporting layer — the report "kind" (funnel, carrier
 hit-rate, or remarketing value) is detected from the scenario's own JSON
 shape, same discipline as Renewal Remarketing's two-shape detection.
 
-Per the approved plan: no live cross-workflow DB aggregation is
-attempted — every scenario's ``underlying_data.json`` is itself a
-pre-aggregated period snapshot, and nothing in this fixture-driven
-codebase has produced real "Q3 2027" activity to query. A live
-`ReviewItem`/`AuditEntry` aggregator across all six prior workflows is
-real, valuable future scope, not something this pass builds or can
-validate against these scenarios.
+Real live cross-workflow DB aggregation exists (``run_live``, below,
+plus ``live_aggregator.py``) — the fixture ``run()`` path here still
+loads a static ``underlying_data.json`` scenario, unchanged, but that is
+no longer the only way this workflow produces a report.
 """
 
 from __future__ import annotations
@@ -39,8 +36,10 @@ from verticals.es.workflows.pipeline_reporting.reporting_engine import (
     CarrierPerformance,
     FunnelResult,
     RemarketOutcome,
+    TimeToPlacement,
     build_carrier_performance,
     build_funnel,
+    build_time_to_placement,
     categorize_remarket_outcome,
 )
 from verticals.es.workflows.pipeline_reporting.scenario_loader import load_scenario
@@ -51,6 +50,7 @@ from verticals.es.workflows.pipeline_reporting.schema import (
     FunnelStageOut,
     PipelineReportPayload,
     RemarketOutcomeOut,
+    TimeToPlacementOut,
 )
 
 WORKFLOW_NAME = "pipeline_reporting"
@@ -67,6 +67,7 @@ class PipelineReportingPipeline:
         self._kind: str = "funnel"
         self._funnel: FunnelResult | None = None
         self._carriers: list[CarrierPerformance] = []
+        self._placements: list[TimeToPlacement] = []
         self._remarket: list[RemarketOutcome] = []
         self._remarket_trigger_summary: dict[str, int] = {}
 
@@ -152,6 +153,24 @@ class PipelineReportingPipeline:
                 "has a data gap, state plainly which stage and why, and never present or imply a "
                 "figure for it — ground every number in the facts given."
             )
+            if self._placements:
+                facts.append(ExtractedValue(
+                    name="time_to_placement",
+                    value=[
+                        {
+                            "carrier_name": p.carrier_name,
+                            "submissions_bound": p.submissions_bound,
+                            "avg_days": p.avg_days,
+                        }
+                        for p in self._placements
+                    ],
+                ))
+                prompt += (
+                    " If you mention time-to-placement figures, state plainly that these are RAW "
+                    "elapsed days from submission to bind, and that broker/agent-side delay has "
+                    "NOT been excluded from them — never imply the figure represents pure "
+                    "carrier-side turnaround time."
+                )
         elif self._kind == "carrier":
             facts.append(ExtractedValue(
                 name="carriers",
@@ -227,6 +246,13 @@ class PipelineReportingPipeline:
                 )
                 for c in self._carriers
             ],
+            time_to_placement=[
+                TimeToPlacementOut(
+                    carrier_name=p.carrier_name, submissions_bound=p.submissions_bound,
+                    avg_days=p.avg_days, low_volume_flag=p.low_volume_flag,
+                )
+                for p in self._placements
+            ],
             remarketing_value=[
                 RemarketOutcomeOut(
                     account=r.account, trigger_level=r.trigger_level, outcome_type=r.outcome_type,
@@ -262,16 +288,19 @@ class PipelineReportingPipeline:
     async def run_live(self, ctx: Ctx, session: AsyncSession) -> OutputPackage:
         """Additive live-aggregation entry point, alongside ``run()``'s
         fixture-scenario path above. Unlike a single scenario (which always
-        exercises exactly one report "kind"), this computes all three
-        sections — funnel, carrier performance, remarketing value — at once
-        from real cross-workflow data. See ``live_aggregator.py`` for the
-        exact mapping and its honest limitations (no revenue attribution,
-        savings only computed for a real recorded carrier switch)."""
+        exercises exactly one report "kind"), this computes all four
+        sections — funnel, carrier performance, time-to-placement,
+        remarketing value — at once from real cross-workflow data. See
+        ``live_aggregator.py`` for the exact mapping and its honest
+        limitations (no revenue attribution, savings only computed for a
+        real recorded carrier switch, time-to-placement is raw elapsed
+        time without FR-4's delay exclusion)."""
         underlying = await build_live_underlying_data(session, ctx)
         self._period = "Live (current data)"
         self._kind = "funnel"  # so decide()/package()'s gap-handling logic below applies
         self._funnel = build_funnel(underlying)
         self._carriers = build_carrier_performance(underlying["carrier_activity"])
+        self._placements = build_time_to_placement(underlying["placements"])
         self._remarket = [
             categorize_remarket_outcome(o) for o in underlying["remarket_outcomes"]
         ]

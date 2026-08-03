@@ -191,6 +191,17 @@ class EndorsementPipeline:
 
         self._premium_bearing = self._change_type in PREMIUM_BEARING_TYPES
 
+        # EP-05: a real issued endorsement attached alongside this request
+        # (live "attach issued endorsement" re-run, via run_live_update) —
+        # never present here via the fixture path, which always keeps these
+        # as two separate scenario stages (see scenario_loader.py's
+        # docstring; confirmed against all 6 real Workflow_15 scenarios).
+        if self._parsed_issued is not None:
+            self._is_reconciliation_pass = True
+            discrepancies = reconcile_items(self._requested_items, self._parsed_issued.issued_items)
+            self._discrepancies = discrepancies
+            self._reconciliation_status = "DISCREPANCY_FLAGGED" if discrepancies else "CLEAN"
+
         if self._premium_bearing and current_terms.get("effective_date") and current_terms.get(
             "expiration_date"
         ):
@@ -299,6 +310,12 @@ class EndorsementPipeline:
                     self._requested_effective_date.isoformat()
                     if self._requested_effective_date else None
                 ),
+                percent_change=(
+                    self._classification.percent_change if self._classification else None
+                ),
+                absolute_change=(
+                    self._classification.absolute_change if self._classification else None
+                ),
             ),
             requested_items=self._requested_items,
             classification=(
@@ -344,6 +361,51 @@ class EndorsementPipeline:
 
     async def run(self, ctx: Ctx, inp: WorkflowInput) -> OutputPackage:
         raw = await self.ingest(ctx, inp)
+        data = await self.extract(ctx, raw)
+        decision = await self.decide(ctx, data)
+        draft = await self.draft(ctx, decision)
+        return await self.package(ctx, data, decision, draft)
+
+    async def run_live(self, ctx: Ctx, bound_policy_context: dict[str, Any]) -> OutputPackage:
+        """Additive entry point, alongside ``run()``'s fixture-scenario path
+        above — starts a real pre-issuance pass from an already-built
+        ``bound_policy_context`` dict (see
+        ``live_ingestion.build_bound_policy_context_from_binder``) instead
+        of loading a Workflow_15 fixture. No issued-endorsement text exists
+        yet at this stage."""
+        return await self.run_live_update(ctx, bound_policy_context)
+
+    async def run_live_update(
+        self,
+        ctx: Ctx,
+        bound_policy_context: dict[str, Any],
+        *,
+        issued_endorsement_raw_text: str | None = None,
+    ) -> OutputPackage:
+        """Covers both live moments: initial creation (no text — what
+        ``run_live()`` above delegates to) and attaching a real issued
+        endorsement once it arrives (``issued_endorsement_raw_text`` set) —
+        re-supply the SAME ``bound_policy_context`` every call (see
+        ``live_ingestion.load_live_bound_policy_context``), since
+        ``_decide_pre_issuance_pass`` needs the full context every run, not
+        just the new text. Simpler than Binder & Issuance's equivalent — no
+        ``RawBundle.documents`` plumbing needed, since ``extract()`` already
+        reads ``self._bundle.carrier_issued_endorsement_text`` directly."""
+        self._bundle = ScenarioBundle(
+            scenario_ref="live",
+            bound_policy_context=bound_policy_context,
+            carrier_issued_endorsement_text=issued_endorsement_raw_text,
+        )
+        self._carrier_panel = load_carrier_panel(self._mm_workflow_n)
+        # Same fields ingest() normally sets from the fixture bundle — this
+        # method bypasses ingest() entirely (no scenario_ref to load), so
+        # they must be set here or every one of them silently stays None.
+        self._bind_id = bound_policy_context.get("bind_id")
+        self._named_insured = bound_policy_context.get("named_insured")
+        self._carrier_id = bound_policy_context.get("carrier_id")
+        self._carrier_name = bound_policy_context.get("carrier_name", "")
+
+        raw = RawBundle(submission_id=self._bind_id)
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)
         draft = await self.draft(ctx, decision)

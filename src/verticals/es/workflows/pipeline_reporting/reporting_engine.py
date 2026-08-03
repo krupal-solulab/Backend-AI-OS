@@ -139,6 +139,40 @@ def build_carrier_performance(
 
 
 @dataclass(frozen=True)
+class TimeToPlacement:
+    carrier_name: str
+    submissions_bound: int
+    avg_days: float
+    low_volume_flag: bool
+
+
+def build_time_to_placement(
+    placements: list[dict[str, Any]], *, min_reliable_volume: int = MIN_RELIABLE_VOLUME
+) -> list[TimeToPlacement]:
+    """PR-03: raw elapsed time (submission matched -> bound), per carrier.
+    FR-4's broker/agent-delay exclusion is deliberately NOT computed here —
+    see ``TimeToPlacementOut``'s docstring in schema.py for why no real
+    data exists anywhere to measure it from. ``placements`` is
+    ``[{"carrier_name": str, "days": int}, ...]``, one entry per real bound
+    submission, already elapsed-time-computed by the caller (this function
+    only aggregates per carrier, never touches raw timestamps itself)."""
+    by_carrier: dict[str, list[int]] = {}
+    for p in placements:
+        by_carrier.setdefault(p["carrier_name"], []).append(p["days"])
+
+    results = [
+        TimeToPlacement(
+            carrier_name=name,
+            submissions_bound=len(days_list),
+            avg_days=round(sum(days_list) / len(days_list), 1),
+            low_volume_flag=len(days_list) < min_reliable_volume,
+        )
+        for name, days_list in by_carrier.items()
+    ]
+    return sorted(results, key=lambda r: r.submissions_bound, reverse=True)
+
+
+@dataclass(frozen=True)
 class RemarketOutcome:
     account: str
     trigger_level: str

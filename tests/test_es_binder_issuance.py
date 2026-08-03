@@ -289,6 +289,30 @@ async def test_run_from_quote_comparison_uses_real_selected_terms(es_ctx, es_ses
     assert payload.bind_order_status == "BLOCKED"
 
 
+async def test_bind_terms_carry_assumed_default_expiration_date(es_ctx, es_session) -> None:
+    """Gap-fill: no real source document (bind confirmation email or issued
+    policy declarations page) ever states an expiration date — confirmed
+    against every real sample in this dataset. A standard 12-month term is
+    derived from the real effective_date and always flagged as an assumed
+    default, so downstream consumers (Endorsement Processing's proration,
+    Renewal Remarketing's FR-1/RR-07) never treat it as more certain than
+    it is."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    meridian_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Meridian Excess & Surplus"
+    )
+    await select_quote(qc_item.id, meridian_quote.quote_id, es_ctx, es_session)
+    item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    terms = item.payload.requested_bind_terms
+    assert terms.effective_date == "2027-09-01"
+    assert terms.expiration_date == "2028-08-31"  # +365 days — 2028 is a leap year
+    assert terms.expiration_date_is_assumed_default is True
+
+
 async def test_run_from_quote_comparison_requires_a_selection_first(es_ctx, es_session) -> None:
     qc_item = await run_quote_comparison(
         QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
