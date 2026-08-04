@@ -70,11 +70,19 @@ class ParsedIssuedPolicy:
     effective_date: date | None
 
 
-def _carrier_name_from_domain(from_line: str) -> str:
+def _carrier_name_from_domain(from_line: str, body: str = "") -> str:
     match = re.search(r"@([\w.-]+)", from_line)
     domain = match.group(1).lower() if match else ""
     if domain in _CARRIER_DOMAINS:
         return _CARRIER_DOMAINS[domain]
+    # Domain isn't a recognized carrier (e.g. a shared test inbox used to
+    # simulate several different carriers) — look for one of the known
+    # carrier names spelled out in the email's own text (signature block,
+    # letterhead) before falling back to a domain-derived guess.
+    lowered_body = body.lower()
+    for name in _CARRIER_DOMAINS.values():
+        if name.lower() in lowered_body:
+            return name
     stem = domain.split(".")[0] if domain else "Unknown Carrier"
     return stem.replace("-", " ").title()
 
@@ -139,7 +147,7 @@ def limits_signature(text: str | None) -> tuple[str, ...]:
 def parse_bind_confirmation(raw_text: str) -> ParsedBindConfirmation:
     header = dict(_HEADER_RE.findall(raw_text))
     body = _HEADER_RE.sub("", raw_text).strip()
-    carrier_name = _carrier_name_from_domain(header.get("From", ""))
+    carrier_name = _carrier_name_from_domain(header.get("From", ""), body)
 
     binder_match = _BINDER_NUMBER_RE.search(body)
     premium_match = _PREMIUM_RE.search(body)

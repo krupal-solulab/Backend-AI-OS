@@ -82,11 +82,19 @@ _CARRIER_DOMAINS: dict[str, str] = {
 }
 
 
-def _carrier_name_from_domain(from_line: str) -> str:
+def _carrier_name_from_domain(from_line: str, body: str = "") -> str:
     match = re.search(r"@([\w.-]+)", from_line)
     domain = match.group(1).lower() if match else ""
     if domain in _CARRIER_DOMAINS:
         return _CARRIER_DOMAINS[domain]
+    # Domain isn't a recognized carrier (e.g. a shared test inbox used to
+    # simulate several different carriers) — look for one of the known
+    # carrier names spelled out in the email's own text (signature block,
+    # letterhead) before falling back to a domain-derived guess.
+    lowered_body = body.lower()
+    for name in _CARRIER_DOMAINS.values():
+        if name.lower() in lowered_body:
+            return name
     stem = domain.split(".")[0] if domain else "Unknown Carrier"
     return stem.replace("-", " ").title()
 
@@ -104,7 +112,7 @@ def parse_date_mmddyyyy(value: str | None) -> date | None:
 def parse_issued_endorsement(raw_text: str) -> ParsedIssuedEndorsement:
     header = dict(_HEADER_RE.findall(raw_text))
     body = _HEADER_RE.sub("", raw_text).strip()
-    carrier_name = _carrier_name_from_domain(header.get("From", ""))
+    carrier_name = _carrier_name_from_domain(header.get("From", ""), body)
 
     number_match = _ENDORSEMENT_NUMBER_RE.search(body)
     effective_match = _EFFECTIVE_DATE_RE.search(body)

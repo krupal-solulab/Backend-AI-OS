@@ -33,6 +33,7 @@ _CARRIER_DOMAINS: dict[str, str] = {
     "coastalmutualspecialty.com": "Coastal Mutual Specialty",
     "harborspecialtyproperty.com": "Harbor Specialty Property",
     "vantageexcess.com": "Vantage Excess",
+    "apexexcess.com": "Apex Excess Lines",
 }
 
 _HEADER_RE = re.compile(r"^(From|To|Subject|Date):\s*(.*)$", re.MULTILINE)
@@ -53,6 +54,26 @@ _ENDORSEMENT_RE = re.compile(
 _NUMBERED_ITEM_RE = re.compile(r"\(\d+\)\s*")
 _DOLLAR_RE = re.compile(r"\$([\d,]+)")
 _DAYS_RE = re.compile(r"within\s+(\d+)\s+days?", re.IGNORECASE)
+
+# Declination trigger phrasing (FR: declination reason extraction) — the
+# dataset's own wording ("not able to offer terms", "decline", "unable to
+# offer") plus common real-world carrier decline phrasing, so genuine carrier
+# emails outside this fixture dataset's exact wording still extract a
+# reason instead of silently falling through to "unable_to_determine".
+_DECLINATION_TRIGGER_RE = re.compile(
+    r"not able to offer terms|unable to offer|unable to quote|unable to provide|"
+    r"unable to write|not able to provide|not able to quote|"
+    r"regret(?:s|fully)?\s+(?:to inform|that)|will not be able to|"
+    r"cannot offer|cannot provide|elect(?:ing)?\s+not to offer|"
+    r"outside\s+(?:of\s+)?our appetite|does not (?:fall|meet) within our appetite|"
+    r"pass on this (?:risk|submission|opportunity|account)|"
+    r"unable to (?:move forward|proceed)|\bdecline\b",
+    re.IGNORECASE,
+)
+_DECLINATION_STOP_RE = re.compile(
+    r"^(Happy to|Please|Thank you|We appreciate|Feel free|Should you|"
+    r"If you have|We look forward)\b"
+)
 
 # Materiality (QC-02): a subjectivity is MATERIAL iff it carries its own
 # countdown/deadline, an actionable scheduling verb, an unresolved dependency
@@ -115,11 +136,19 @@ class ParsedResponse:
     declination_reason_amount: float | None = None
 
 
-def _carrier_name_from_domain(from_line: str) -> str:
+def _carrier_name_from_domain(from_line: str, body: str = "") -> str:
     match = re.search(r"@([\w.-]+)", from_line)
     domain = match.group(1).lower() if match else ""
     if domain in _CARRIER_DOMAINS:
         return _CARRIER_DOMAINS[domain]
+    # Domain isn't a recognized carrier (e.g. a shared test inbox used to
+    # simulate several different carriers) — look for one of the known
+    # carrier names spelled out in the email's own text (signature block,
+    # letterhead) before falling back to a domain-derived guess.
+    lowered_body = body.lower()
+    for name in _CARRIER_DOMAINS.values():
+        if name.lower() in lowered_body:
+            return name
     stem = domain.split(".")[0] if domain else "Unknown Carrier"
     return stem.replace("-", " ").title()
 
@@ -213,11 +242,11 @@ def _extract_declination_reason(body: str) -> tuple[str | None, float | None]:
     reason_sentences: list[str] = []
     capturing = False
     for sentence in sentences:
-        if re.search(r"not able to offer terms|decline|unable to offer", sentence, re.IGNORECASE):
+        if _DECLINATION_TRIGGER_RE.search(sentence):
             capturing = True
             continue
         if capturing:
-            if re.match(r"^(Happy to|Please|Thank you)\b", sentence.strip()):
+            if _DECLINATION_STOP_RE.match(sentence.strip()):
                 break
             reason_sentences.append(sentence.strip())
     reason = " ".join(reason_sentences).strip() or None
@@ -232,7 +261,7 @@ def _extract_declination_reason(body: str) -> tuple[str | None, float | None]:
 def parse_response(filename: str, raw_text: str) -> ParsedResponse:
     header = dict(_HEADER_RE.findall(raw_text))
     body = _HEADER_RE.sub("", raw_text).strip()
-    carrier_name = _carrier_name_from_domain(header.get("From", ""))
+    carrier_name = _carrier_name_from_domain(header.get("From", ""), body)
     named_insured = _named_insured_from_subject(header.get("Subject", ""))
     response_date = _parse_date(header.get("Date", ""))
 
