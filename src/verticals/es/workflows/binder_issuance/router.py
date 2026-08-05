@@ -74,6 +74,10 @@ class ResolveDiscrepancyRequest(BaseModel):
     resolution: str  # accept_carrier_version | accept_issued_version | flag_carrier_error
 
 
+class ClearSubjectivityRequest(BaseModel):
+    description: str  # exact description text of the pre-bind subjectivity to clear
+
+
 class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
@@ -238,6 +242,58 @@ async def attach_live_confirmation(
     output = await pipeline.run_live_update(
         ctx, instruction, confirmation_raw_text=text,
         existing_bind_id=old_payload.get("bind_id"),
+    )
+
+    pkg.payload = output.payload
+    session.add(pkg)
+    await session.commit()
+    await _fire_newly_true_triggers(session, ctx, item, old_payload, output.payload)
+
+    return ReviewItemOut(
+        id=item.id, submission_id=item.submission_id, status=item.status.value,
+        payload=BindCoordinationPayload(**output.payload),
+    )
+
+
+@router.post("/{item_id}/clear-subjectivity")
+async def clear_subjectivity(
+    item_id: str, body: ClearSubjectivityRequest, ctx: CtxDep, session: SessionDep
+) -> ReviewItemOut:
+    """Additive: marks one real pre-bind subjectivity as resolved (broker
+    confirms the underlying condition was actually satisfied — e.g. the
+    signed application came back, the loss-run addendum was provided) and
+    re-runs BI-02's blocking check for real. Previously the one real dead
+    end in this workflow's live path: a material, unresolved subjectivity
+    permanently blocked a bind order with no way anywhere to mark it
+    resolved. Matched by exact description text (subjectivities carry no
+    other real identifier); if the same description appears more than
+    once, every matching instance clears together."""
+    item = await _item_or_404(item_id, ctx, session)
+    pkg = await _pkg_row_for(session, item)
+    if pkg is None or pkg.payload is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no coordination payload for this item")
+    old_payload = pkg.payload
+
+    subjectivities = old_payload.get("pre_bind_subjectivities") or []
+    matched = False
+    updated_subjectivities = []
+    for s in subjectivities:
+        s = dict(s)
+        if s.get("description") == body.description:
+            s["status"] = "cleared"
+            matched = True
+        updated_subjectivities.append(s)
+    if not matched:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"no pre-bind subjectivity matching {body.description!r} on this bind",
+        )
+
+    mutated_payload = {**old_payload, "pre_bind_subjectivities": updated_subjectivities}
+    instruction = instruction_from_stored_payload(mutated_payload)
+    pipeline = _pipeline()
+    output = await pipeline.run_live_update(
+        ctx, instruction, existing_bind_id=old_payload.get("bind_id"),
     )
 
     pkg.payload = output.payload

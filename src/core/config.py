@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     quote_rank_price_weight: float = 1.0
     quote_rank_subjectivity_penalty: float = 0.0
 
+    # ── Carrier Appetite Intelligence signal threshold (CI-01/FR-3) ──
+    # Minimum total real declinations from ONE carrier before any pattern
+    # judgment fires (never off a single data point) — FR-3 explicitly
+    # calls for this to be "configurable, validated during discovery,"
+    # not a permanent hardcoded value. Default of 3 matches this
+    # project's own verified sample-dataset scenarios.
+    carrier_appetite_min_total_outcomes: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -15,7 +15,9 @@ per carrier in a multi-carrier selection (see router.py).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
@@ -66,6 +68,24 @@ _OUTCOME_BY_STATUS = {
     "READY_WITH_GAP": DecisionOutcome.PROCEED,
     "BLOCKED": DecisionOutcome.REQUEST_INFO,
 }
+
+_LOSS_RUN_YEARS_RE = re.compile(r"\d+")
+
+
+def _real_loss_run_years_provided(data: ExtractedModel) -> int | None:
+    """The real extracted loss-run year count for this submission, if any —
+    same field Market Matching's own MM-06 check already reads
+    (``loss_run.years_of_history_provided``), reused here so the live
+    completeness check (``live_completeness_check``) can compare a
+    carrier's stated minimum against a real number instead of skipping the
+    year check entirely."""
+    value = next(
+        (f.value for f in data.fields if f.name == "loss_run.years_of_history_provided"), None
+    )
+    if value is None:
+        return None
+    match = _LOSS_RUN_YEARS_RE.search(str(value))
+    return int(match.group()) if match else None
 
 
 class PackageAssemblyPipeline:
@@ -122,7 +142,14 @@ class PackageAssemblyPipeline:
     async def decide(self, ctx: Ctx, data: ExtractedModel) -> Decision:
         assert self._carrier_view is not None, "ingest() must run before decide()"
         result = (
-            assemble_package(self._carrier_view, data, document_check_fn=live_completeness_check)
+            assemble_package(
+                self._carrier_view,
+                data,
+                document_check_fn=partial(
+                    live_completeness_check,
+                    loss_run_years_provided=_real_loss_run_years_provided(data),
+                ),
+            )
             if self._is_live
             else assemble_package(self._carrier_view, data)
         )

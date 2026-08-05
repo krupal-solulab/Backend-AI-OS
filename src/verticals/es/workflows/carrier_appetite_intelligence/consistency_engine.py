@@ -81,7 +81,9 @@ class PatternResult:
     evidence: list[EvidenceItem] = field(default_factory=list)
 
 
-def score_pattern(outcomes: list[dict[str, Any]]) -> PatternResult:
+def score_pattern(
+    outcomes: list[dict[str, Any]], *, min_total_outcomes: int = MIN_TOTAL_OUTCOMES
+) -> PatternResult:
     """CI-02/CI-05: the central judgment call. See module docstring for
     the exact scenario-by-scenario trace this reproduces:
     - Scenario 01 (1 outcome): suppressed on volume alone, regardless of
@@ -92,7 +94,11 @@ def score_pattern(outcomes: list[dict[str, Any]]) -> PatternResult:
       outcome contributes ZERO toward class-level evidence, regardless of
       ratio -> INSUFFICIENT_SIGNAL, never scored like Scenario 02.
     - Scenario 04 (4/4 consistent, sufficient volume): CONFIRMED_CONSISTENT.
-    """
+
+    ``min_total_outcomes`` defaults to this module's own placeholder
+    constant so every existing direct/test caller keeps byte-identical
+    behavior; real callers (service.py) pass the real, configurable
+    ``Settings.carrier_appetite_min_total_outcomes`` (FR-3) instead."""
     sorted_outcomes = sorted(outcomes, key=lambda o: o["date"])
     evidence = [
         EvidenceItem(
@@ -110,7 +116,7 @@ def score_pattern(outcomes: list[dict[str, Any]]) -> PatternResult:
     ]
     total = len(sorted_outcomes)
 
-    if total < MIN_TOTAL_OUTCOMES:
+    if total < min_total_outcomes:
         return PatternResult("INSUFFICIENT_SIGNAL", total, 0, evidence)
 
     if all(o.get("consistent_with_profile") for o in sorted_outcomes):

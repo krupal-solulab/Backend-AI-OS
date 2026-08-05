@@ -38,6 +38,7 @@ from core.common.dtos import (
     WorkflowInput,
 )
 from core.common.enums import DecisionOutcome
+from core.config import get_settings
 from core.llm.service import LLMService
 from verticals.es.decision_core.carrier_profiles import load_carrier_panel
 from verticals.es.workflows.carrier_appetite_intelligence.consistency_engine import (
@@ -95,7 +96,10 @@ class CarrierAppetiteIntelligencePipeline:
                 "appetite_confidence", "medium"
             )
 
-        self._result = score_pattern(context["observed_outcomes"])
+        self._result = score_pattern(
+            context["observed_outcomes"],
+            min_total_outcomes=get_settings().carrier_appetite_min_total_outcomes,
+        )
         return RawBundle(submission_id=f"{self._carrier_id}:{self._class_code}")
 
     async def extract(self, ctx: Ctx, raw: RawBundle) -> ExtractedModel:
@@ -264,7 +268,10 @@ class CarrierAppetiteIntelligencePipeline:
             real_profile.appetite_confidence if real_profile is not None else "medium"
         )
 
-        self._result = score_pattern(context["observed_outcomes"])
+        self._result = score_pattern(
+            context["observed_outcomes"],
+            min_total_outcomes=get_settings().carrier_appetite_min_total_outcomes,
+        )
         raw = RawBundle(submission_id=f"{self._carrier_id}:{self._class_code}")
         data = await self.extract(ctx, raw)
         decision = await self.decide(ctx, data)

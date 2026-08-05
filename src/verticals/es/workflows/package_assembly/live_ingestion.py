@@ -15,15 +15,20 @@ Honest limitations, by design, not oversight:
   already handles an absent ``preferred_form_versions`` as a no-op).
 - Real document extraction only identifies document TYPE (ACORD/loss run/
   financials/SOV), never an exact form edition (e.g. "ACORD 125" vs "ACORD
-  140") or a loss run's covered-year count. So this module's own
-  completeness check (``live_completeness_check`` below) matches by
-  document TYPE only — any ACORD on file satisfies any ACORD-type
-  requirement, any loss run on file satisfies a loss-run requirement
-  regardless of the carrier's stated minimum year count. This is a real,
-  coarser simplification versus the fixture path's exact-string/year-aware
-  ``check_document`` (``assembly.py``, left 100% untouched — only passed in
-  as an override via ``assemble_package``'s new ``document_check_fn``
-  parameter for this path specifically).
+  140"). So this module's own completeness check (``live_completeness_check``
+  below) matches by document TYPE only for edition purposes — any ACORD on
+  file satisfies any ACORD-type requirement, regardless of exact form
+  version. This is a real, coarser simplification versus the fixture path's
+  exact-string ``check_document`` (``assembly.py``, left 100% untouched —
+  only passed in as an override via ``assemble_package``'s new
+  ``document_check_fn`` parameter for this path specifically).
+- Loss-run YEAR count, unlike form edition, genuinely IS available on the
+  live path (Market Matching's own MM-06 check already reads
+  ``loss_run.years_of_history_provided`` from the same real extraction) —
+  ``live_completeness_check`` takes an optional ``loss_run_years_provided``
+  and, when a requirement states a minimum year count, checks it exactly
+  like the fixture path's ``check_document`` does. See ``service.py``'s
+  ``decide()`` for where the real value is read and bound in.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from core.extraction import DefaultExtractionService
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from verticals.es.decision_core.carrier_profiles import load_carrier_panel
+from verticals.es.workflows.package_assembly.assembly import _extract_years
 from verticals.es.workflows.package_assembly.diligent_search_lookup import (
     real_diligent_search_status,
 )
@@ -67,17 +73,33 @@ def _requirement_kind(requirement: str) -> str | None:
 
 
 def live_completeness_check(
-    requirement: str, available_kinds: list[str], _missing_info: list[dict[str, Any]]
+    requirement: str,
+    available_kinds: list[str],
+    _missing_info: list[dict[str, Any]],
+    *,
+    loss_run_years_provided: int | None = None,
 ) -> tuple[bool, str | None]:
-    """The live path's own, coarser completeness check — matches by
-    document TYPE only. Passed into ``assemble_package`` as
-    ``document_check_fn``; ``assembly.check_document`` itself stays
-    untouched for the fixture-scenario path. See module docstring for
-    exactly what this trades away."""
+    """The live path's own completeness check — matches by document TYPE
+    (edition-blind, per module docstring), but DOES check the loss-run year
+    count against a requirement's stated minimum when
+    ``loss_run_years_provided`` is supplied (real extracted value, not
+    fabricated) — same year-shortfall behavior as the fixture path's
+    ``check_document``, just against a real number instead of a fixture
+    filename's embedded one. Passed into ``assemble_package`` as
+    ``document_check_fn`` (bound via ``functools.partial`` in ``service.py``
+    so its call signature still matches every other document_check_fn)."""
     kind = _requirement_kind(requirement)
-    if kind is not None and kind in available_kinds:
-        return True, None
-    return False, "not on file (real document check — matches by type, not exact edition)"
+    if kind is None or kind not in available_kinds:
+        return False, "not on file (real document check — matches by type, not exact edition)"
+    if kind == "loss_run":
+        required_years = _extract_years(requirement)
+        if (
+            required_years is not None
+            and loss_run_years_provided is not None
+            and loss_run_years_provided < required_years
+        ):
+            return False, f"only {loss_run_years_provided} of {required_years} required years"
+    return True, None
 
 
 async def real_market_matching_payload(

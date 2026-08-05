@@ -33,11 +33,13 @@ from verticals.es.workflows.agent_communication.router import list_agent_communi
 from verticals.es.workflows.binder_issuance.coordination_engine import recompute_live_state
 from verticals.es.workflows.binder_issuance.router import (
     AttachLiveMessageRequest,
+    ClearSubjectivityRequest,
     ResolveDiscrepancyRequest,
     RunFromQuoteRequest,
     RunRequest,
     attach_live_confirmation,
     attach_live_policy,
+    clear_subjectivity,
     escalate,
     list_live_inbox,
     resolve_confirmation_discrepancy,
@@ -534,6 +536,59 @@ async def test_attach_live_confirmation_rejected_when_blocked(es_ctx, es_session
             bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
         )
     assert exc_info.value.status_code == 409
+
+
+async def test_clear_subjectivity_unblocks_a_real_blocked_bind(es_ctx, es_session) -> None:
+    """Same real BLOCKED bind as test_attach_live_confirmation_rejected_when_blocked
+    above — proves the previously-permanent dead end is now real and
+    fixable: clearing the open material subjectivity flips BLOCKED -> READY,
+    and a confirmation can then be attached without the 409."""
+    qc_item = await run_quote_comparison(
+        QuoteRunRequest(scenario_ref="scenario_01", as_of="2027-07-29"), es_ctx, es_session
+    )
+    meridian_quote = next(
+        q for q in qc_item.payload.quotes if q.carrier_name == "Meridian Excess & Surplus"
+    )
+    await select_quote(qc_item.id, meridian_quote.quote_id, es_ctx, es_session)
+    bind_item = await run_binder_issuance_from_quote(
+        RunFromQuoteRequest(quote_comparison_item_id=qc_item.id), es_ctx, es_session
+    )
+    assert bind_item.payload.bind_order_status == "BLOCKED"
+    open_material = next(
+        s for s in bind_item.payload.pre_bind_subjectivities
+        if s.materiality == "material" and s.status == "open"
+    )
+
+    updated = await clear_subjectivity(
+        bind_item.id, ClearSubjectivityRequest(description=open_material.description),
+        es_ctx, es_session,
+    )
+
+    assert updated.payload.bind_order_status == "READY"
+    cleared = next(
+        s for s in updated.payload.pre_bind_subjectivities
+        if s.description == open_material.description
+    )
+    assert cleared.status == "cleared"
+
+    # And attach-confirmation, previously rejected with 409 (BLOCKED), no longer is.
+    with pytest.raises(HTTPException) as exc_info:
+        await attach_live_confirmation(
+            bind_item.id, AttachLiveMessageRequest(message_id="msg-confirmation-1"), es_ctx, es_session
+        )
+    # Now fails for a DIFFERENT reason (no live Gmail connector mocked in this
+    # test) rather than the 409 "still BLOCKED" this test exists to disprove.
+    assert exc_info.value.status_code != 409
+
+
+async def test_clear_subjectivity_404s_on_unknown_description(es_ctx, es_session) -> None:
+    bind_item = await _ready_ironclad_bind_item(es_ctx, es_session)
+    with pytest.raises(HTTPException) as exc_info:
+        await clear_subjectivity(
+            bind_item.id, ClearSubjectivityRequest(description="no such subjectivity"),
+            es_ctx, es_session,
+        )
+    assert exc_info.value.status_code == 404
 
 
 async def test_attach_live_policy_requires_confirmation_first(es_ctx, es_session) -> None:
