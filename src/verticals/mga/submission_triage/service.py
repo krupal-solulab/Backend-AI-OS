@@ -118,7 +118,7 @@ class TriageService:
         session.add(sub)
         await session.flush()
 
-        connector = build_connector_service(workflow_n=self.workflow_n, session=session)
+        connector = build_connector_service(workflow_n=self.workflow_n)
         raw = await connector.to_raw_bundle(ctx, message_id)
         model = await self.extraction.extract(ctx, raw)
 

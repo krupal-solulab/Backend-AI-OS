@@ -49,28 +49,9 @@ class Settings(BaseSettings):
     nango_integration_sheet: str = "google-sheet"
     nango_integration_drive: str = "google-drive"
     connectors_mode: str = "mock"  # mock = fixtures offline | live = real Nango
-    # Default Gmail search for the live inbox picker — matches the real dataset's
-    # "Submission - <Insured> - <Line> - Eff <date>" subject convention. Tune this
-    # (e.g. drop "subject:submission", or add "from:@youragency.com") once you
-    # know your real intake mailbox's conventions, no code change needed.
-    nango_inbox_query: str = "in:inbox newer_than:30d subject:submission"
 
     # ── Test data / fixtures ─────────────────────────
     test_data_root: str = ""
-
-    # ── Quote Comparison recommendation weighting (QC-04/FR-18) ─────
-    # Default price_weight=1.0/subjectivity_penalty=0.0 reproduces the
-    # original pure-premium ranking exactly — configurable, not hardcoded.
-    quote_rank_price_weight: float = 1.0
-    quote_rank_subjectivity_penalty: float = 0.0
-
-    # ── Carrier Appetite Intelligence signal threshold (CI-01/FR-3) ──
-    # Minimum total real declinations from ONE carrier before any pattern
-    # judgment fires (never off a single data point) — FR-3 explicitly
-    # calls for this to be "configurable, validated during discovery,"
-    # not a permanent hardcoded value. Default of 3 matches this
-    # project's own verified sample-dataset scenarios.
-    carrier_appetite_min_total_outcomes: int = 3
 
 
 @lru_cache

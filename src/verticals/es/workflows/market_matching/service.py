@@ -70,12 +70,7 @@ class MarketMatchingPipeline:
         message_id = inp.source_ref or inp.submission_id
         if not message_id:
             raise ValueError("WorkflowInput needs submission_id or source_ref to ingest")
-        raw = await self._connector.to_raw_bundle(ctx, message_id)
-        if self._documents is not None:
-            submission_id = raw.submission_id or message_id
-            for doc in raw.documents:
-                await self._documents.save(self._session, ctx, submission_id, doc)
-        return raw
+        return await self._connector.to_raw_bundle(ctx, message_id)
 
     async def extract(self, ctx: Ctx, raw: RawBundle) -> ExtractedModel:
         return await self._extraction.extract(ctx, raw)
