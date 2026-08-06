@@ -26,6 +26,10 @@ CtxDep = Annotated[Ctx, Depends(get_ctx)]
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
+class ConnectSessionRequest(BaseModel):
+    provider: str
+
+
 class ConnectSessionOut(BaseModel):
     session_token: str
     expires_at: str | None = None
@@ -43,10 +47,21 @@ class ConnectionOut(BaseModel):
 
 @router.post("/connect-session", status_code=status.HTTP_201_CREATED)
 async def create_connect_session(
-    ctx: CtxDep, settings: Annotated[Settings, Depends(get_settings)]
+    body: ConnectSessionRequest,
+    ctx: CtxDep,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ConnectSessionOut:
     """Mints a Nango Connect UI session token scoped to this tenant + the
-    google-mail integration, so the frontend can open the hosted OAuth popup."""
+    requested integration, so the frontend can open the hosted OAuth popup.
+    ``provider`` must be one of this deployment's known Nango integration
+    keys (Gmail/Sheets/Drive) — never passed through to Nango unchecked."""
+    known_providers = {
+        settings.nango_integration_mail,
+        settings.nango_integration_sheet,
+        settings.nango_integration_drive,
+    }
+    if body.provider not in known_providers:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unknown provider: {body.provider}")
     if not settings.nango_secret_key:
         raise HTTPException(
             status.HTTP_412_PRECONDITION_FAILED, "NANGO_SECRET_KEY is not configured"
@@ -57,7 +72,7 @@ async def create_connect_session(
             headers={"Authorization": f"Bearer {settings.nango_secret_key}"},
             json={
                 "end_user": {"id": ctx.tenant_id},
-                "allowed_integrations": [settings.nango_integration_mail],
+                "allowed_integrations": [body.provider],
             },
         )
     if resp.status_code >= 400:
