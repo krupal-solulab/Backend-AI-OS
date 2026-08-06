@@ -20,9 +20,12 @@ app = FastAPI(title="Insurance OS Backend", version="0.0.0")
 # Dev-only: the Lovable-managed frontend's sandbox dev server is pinned to port 8080
 # (see Insurance OS's @lovable.dev/vite-tanstack-config). Header-stub auth (Phase 0)
 # means no cookies are involved, so credentials stay disabled.
+# `allow_origin_regex` additionally covers Vercel's per-branch/PR preview subdomains
+# (e.g. insurance-os-es-broker-fe-98n7.vercel.app), not just one fixed hostname.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8080"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
