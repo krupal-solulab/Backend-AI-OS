@@ -1,12 +1,14 @@
-"""Ingestion (Phase 1) — the shared ``ConnectorService`` (Nango-shaped) with a
-fixtures-backed mock and a live REST stub, selected by ``CONNECTORS_MODE``.
+"""Ingestion — the shared ``ConnectorService`` (Nango-shaped) with a fixtures-backed
+mock and a real Nango-proxy-backed live implementation, selected by
+``CONNECTORS_MODE``.
 
-Hard rules (CONNECTORS_NANGO.md): no direct Google SDKs; tenant-scoped; and **no
-auto-send** — ``send_email`` is only ever invoked from a human-triggered action, never
-from the ingestion path. In Phase 1 the live path makes **no real network calls**.
+Hard rules (CONNECTORS_NANGO.md): no direct Google SDKs (Gmail is only ever reached
+through the Nango proxy); tenant-scoped; and **no auto-send** — ``send_email`` is
+only ever invoked from a human-triggered action, never from the ingestion path.
 """
 
 from core.ingestion.connectors import (
+    ConnectorNotConnectedError,
     ConnectorService,
     EmailMessage,
     FileBlob,
@@ -17,6 +19,7 @@ from core.ingestion.connectors import (
 )
 
 __all__ = [
+    "ConnectorNotConnectedError",
     "ConnectorService",
     "EmailMessage",
     "FileBlob",
