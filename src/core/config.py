@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     nango_integration_mail: str = "google-mail"
     nango_integration_sheet: str = "google-sheet"
     nango_integration_drive: str = "google-drive"
+    nango_integration_calendar: str = "google-calendar"
     connectors_mode: str = "mock"  # mock = fixtures offline | live = real Nango
     # Default Gmail search for the live inbox picker — matches the real dataset's
     # "Submission - <Insured> - <Line> - Eff <date>" subject convention. Tune this

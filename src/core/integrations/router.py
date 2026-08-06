@@ -59,6 +59,7 @@ async def create_connect_session(
         settings.nango_integration_mail,
         settings.nango_integration_sheet,
         settings.nango_integration_drive,
+        settings.nango_integration_calendar,
     }
     if body.provider not in known_providers:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unknown provider: {body.provider}")
