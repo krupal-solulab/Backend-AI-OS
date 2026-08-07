@@ -17,16 +17,13 @@ from core.common.enums import ReviewAction
 from core.db import get_session
 from core.documents import LocalDocumentStore
 from core.extraction import DefaultExtractionService
-from core.ingestion.connectors import ConnectorNotConnectedError, build_connector_service
+from core.ingestion.connectors import build_connector_service
 from core.llm import build_llm_service
 from core.models import OutputPackage as OutputPackageRow
 from core.models import ReviewItem as ReviewItemRow
 from core.review_queue import AuthorityError, DefaultReviewQueueService
 from core.rules_engine import DefaultRulesEngine
 from core.tenancy.dependencies import get_ctx
-from verticals.es.agent_communication_hooks import fire_no_market_found
-from verticals.es.diligent_search_hooks import fire_diligent_search_required
-from verticals.es.workflows.market_matching.schema import MarketMatchingPayload
 from verticals.es.workflows.market_matching.service import (
     DEFAULT_WORKFLOW_N,
     WORKFLOW_NAME,
@@ -44,7 +41,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 def _pipeline(session: AsyncSession) -> MarketMatchingPipeline:
     return MarketMatchingPipeline(
         session=session,
-        connector=build_connector_service(workflow_n=DEFAULT_WORKFLOW_N, session=session),
+        connector=build_connector_service(workflow_n=DEFAULT_WORKFLOW_N),
         extraction=DefaultExtractionService(),
         rules_engine=DefaultRulesEngine(),
         llm=build_llm_service(),
@@ -61,34 +58,7 @@ class ReviewItemOut(BaseModel):
     id: str
     submission_id: str | None
     status: str
-    payload: MarketMatchingPayload | None = None
-
-
-class DocumentOut(BaseModel):
-    filename: str
-    kind: str
-    content: str
-
-
-class LiveInboxMessageOut(BaseModel):
-    id: str
-    subject: str
-
-
-@router.get("/live-inbox")
-async def list_live_inbox(ctx: CtxDep, session: SessionDep) -> list[LiveInboxMessageOut]:
-    """Real Gmail messages (via the connected Nango integration) to pick from and
-    run through `/run` as a real ``submission_ref`` — additive alongside the
-    fixture-scenario path; requires Gmail connected + CONNECTORS_MODE=live."""
-    connector = build_connector_service(workflow_n=DEFAULT_WORKFLOW_N, session=session)
-    try:
-        messages = await connector.fetch_inbox(ctx)
-    except ConnectorNotConnectedError as exc:
-        raise HTTPException(
-            status.HTTP_428_PRECONDITION_REQUIRED,
-            f"Connect Gmail in Settings first ({exc.provider} not connected)",
-        ) from exc
-    return [LiveInboxMessageOut(id=m.id, subject=m.subject) for m in messages]
+    payload: dict[str, object] | None = None
 
 
 @router.post("/run", status_code=status.HTTP_201_CREATED)
@@ -101,8 +71,6 @@ async def run_market_matching(body: RunRequest, ctx: CtxDep, session: SessionDep
 
     review_queue = DefaultReviewQueueService()
     item = await review_queue.enqueue(session, ctx, output, WORKFLOW_NAME)
-    await fire_no_market_found(session, ctx, output)  # additive, no-throw — see module docstring
-    await fire_diligent_search_required(session, ctx, output)  # additive, no-throw — MM-07
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value,
         payload=output.payload,
@@ -148,28 +116,6 @@ async def get_market_matching(item_id: str, ctx: CtxDep, session: SessionDep) ->
     return ReviewItemOut(
         id=item.id, submission_id=item.submission_id, status=item.status.value, payload=payload
     )
-
-
-@router.get("/{item_id}/documents", response_model=list[DocumentOut])
-async def list_documents(
-    item_id: str, ctx: CtxDep, session: SessionDep
-) -> list[DocumentOut]:
-    """The raw documents `ingest()` persisted via `LocalDocumentStore` for this
-    submission — real fixture content, not extracted/cited fields (see
-    core/extraction for that)."""
-    item = (
-        await session.execute(
-            select(ReviewItemRow).where(
-                col(ReviewItemRow.id) == item_id, col(ReviewItemRow.tenant_id) == ctx.tenant_id
-            )
-        )
-    ).scalar_one_or_none()
-    if item is None or item.submission_id is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, f"no market-matching review item '{item_id}'"
-        )
-    docs = await LocalDocumentStore().list_for_submission(session, ctx, item.submission_id)
-    return [DocumentOut(filename=d.filename, kind=d.kind.value, content=d.content) for d in docs]
 
 
 async def _act(

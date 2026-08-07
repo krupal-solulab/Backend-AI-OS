@@ -199,20 +199,14 @@ def _augment_model(
     return augmented
 
 
-def _severity_is_hard(profile: CarrierProfile, submission_class: str) -> bool:
+def _severity_is_hard(submission_class: str) -> bool:
     """MM-05's hard/soft distinction is per class, not universal (interpretation
-    guide) — and, per the guide's own suggestion, configurable per carrier
-    rather than hardcoded once a carrier's profile says so explicitly via
-    ``ceiling_type``. A carrier profile leaving ``ceiling_type`` unset falls
-    back to the guide's own worked example: roofing severity ceilings are
-    firm appetite boundaries; elsewhere severity is a scoring factor. See
-    Validation_Rules_Test_Dataset.md's "Known dataset/guide discrepancy" note
-    for the one case (submission_04) where the heuristic fallback diverges
-    from the interpretation guide's summary-table prose."""
-    if profile.ceiling_type == "hard":
-        return True
-    if profile.ceiling_type == "soft":
-        return False
+    guide). None of this panel's carrier profiles carry an explicit
+    ``ceiling_type`` field, so this implements the guide's own worked example
+    directly: roofing severity ceilings are firm appetite boundaries; elsewhere
+    severity is a scoring factor. See Validation_Rules_Test_Dataset.md's
+    "Known dataset/guide discrepancy" note for the one case (submission_04)
+    where this diverges from the interpretation guide's summary-table prose."""
     return "roofing" in _norm(submission_class)
 
 
@@ -327,7 +321,7 @@ async def evaluate_carrier(
     # can't give us (see `_max_single_claim_incurred`) — native by necessity.
     max_claim = _max_single_claim_incurred(model)
     ceiling = profile.severity_ceiling.max_single_claim_incurred
-    if max_claim is not None and max_claim > ceiling and _severity_is_hard(profile, submission_class):
+    if max_claim is not None and max_claim > ceiling and _severity_is_hard(submission_class):
         return HardExclusion(
             profile.carrier_id, profile.carrier_name, "MM-05",
             f"Single claim ${max_claim:,.0f} exceeds hard severity ceiling ${ceiling:,.0f}",

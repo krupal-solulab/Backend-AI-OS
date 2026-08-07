@@ -21,7 +21,10 @@ The goal: once the shared core exists, **Dev A builds MGA Submission Triage** an
 
 ## Migrations without stepping on each other
 - Prefer **additive** migrations; name them `NNN_<vertical>_<workflow>_<change>`.
-- Two devs adding tables the same day = two separate migration files → no conflict. Coordinate only if editing a shared base table (rare; route through the lead).
+- Two devs adding tables the same day = two separate migration files → no *file* conflict. Coordinate only if editing a shared base table (rare; route through the lead).
+- **Multiple heads:** if both devs branch a migration from the same parent, Alembic ends up with two heads. After integrating, run `alembic heads` — if it shows two, run **`alembic merge heads -m "merge <mga>+<es> migrations"`** to create a merge revision, then `alembic upgrade head`. This is expected in parallel work, not an error.
+- **Prefer branch-per-workflow + PR** (`feat/mga-<workflow>`, `feat/es-<workflow>`) so `main` advances by fast-forward/auto-merge and head divergence is resolved at merge time, not on everyone's local.
+- `verticals/<vertical>/models.py` is auto-discovered by `migrations/env.py` (glob) — a new vertical/workflow's tables are picked up with **no edit to `env.py`**.
 
 ## Branching
 - `main` protected; PR + review.
