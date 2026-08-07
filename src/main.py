@@ -9,15 +9,24 @@ from __future__ import annotations
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.assistant.router import router as assistant_router
+from core.auth.router import router as auth_router
+from core.integrations.router import router as integrations_router
 from verticals.es.router import router as es_router
 from verticals.mga.router import router as mga_router
 
 app = FastAPI(title="Insurance OS Backend", version="0.0.0")
 
-# Dev CORS — allow the local FE dev server (any localhost origin) to call the API.
+# Dev-only: the Lovable-managed frontend's sandbox dev server is pinned to port 8080
+# (see Insurance OS's @lovable.dev/vite-tanstack-config). Header-stub auth (Phase 0)
+# means no cookies are involved, so credentials stay disabled.
+# `allow_origin_regex` additionally covers Vercel's per-branch/PR preview subdomains
+# (e.g. insurance-os-es-broker-fe-98n7.vercel.app), not just one fixed hostname.
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=["http://localhost:8080"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -30,6 +39,10 @@ async def health() -> dict[str, int]:
     """Liveness probe. Phase marker confirms which milestone this build is at."""
     return {"phase": 0}
 
+
+core_router.include_router(integrations_router)
+core_router.include_router(auth_router)
+core_router.include_router(assistant_router)
 
 app.include_router(core_router)
 app.include_router(mga_router)

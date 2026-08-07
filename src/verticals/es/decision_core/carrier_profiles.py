@@ -37,9 +37,11 @@ class SubmissionRequirements:
 
 @dataclass(frozen=True)
 class CarrierProfile:
-    """One carrier's appetite profile. ``ceiling_type`` is an E&S decision_core
-    addition (not present in the source JSON — see matching.py's `_ceiling_type`
-    for how it's derived) so callers don't need to re-derive it."""
+    """One carrier's appetite profile. ``ceiling_type`` ("hard" | "soft"), when
+    present in the source JSON, is the carrier's own explicit MM-05
+    hard/soft severity-ceiling declaration — see matching.py's
+    `_severity_is_hard`, which uses it when set and falls back to the
+    roofing-class heuristic only when a carrier's profile leaves it unset."""
 
     carrier_id: str
     carrier_name: str
@@ -53,6 +55,7 @@ class CarrierProfile:
     historical_hit_rate_this_class: float
     lines_written: tuple[str, ...] = ()
     notes: str = ""
+    ceiling_type: str | None = None  # "hard" | "soft" | None (unset -> heuristic)
 
 
 def _dataset_dir(n: int) -> Path | None:
@@ -89,6 +92,7 @@ def _to_profile(raw: dict[str, object]) -> CarrierProfile:
         historical_hit_rate_this_class=float(raw.get("historical_hit_rate_this_class", 0.5)),  # type: ignore[arg-type]
         lines_written=tuple(raw.get("lines_written", []) or []),  # type: ignore[arg-type]
         notes=str(raw.get("notes", "")),
+        ceiling_type=raw.get("ceiling_type"),  # type: ignore[arg-type]
     )
 
 
