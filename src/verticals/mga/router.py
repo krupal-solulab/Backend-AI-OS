@@ -6,6 +6,7 @@ The MGA developer mounts each workflow here with a single ``include_router(...)`
 
 from fastapi import APIRouter
 
+from verticals.mga.broker_copilot.router import router as broker_copilot_router
 from verticals.mga.renewal_management.router import router as renewal_management_router
 from verticals.mga.submission_triage import router as submission_triage_router
 
@@ -13,3 +14,4 @@ router = APIRouter(prefix="/api/mga", tags=["mga"])
 
 router.include_router(submission_triage_router)
 router.include_router(renewal_management_router)
+router.include_router(broker_copilot_router)
