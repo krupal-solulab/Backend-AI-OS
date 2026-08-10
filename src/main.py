@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.assistant.router import router as assistant_router
 from core.auth.router import router as auth_router
+from core.dashboard.router import router as dashboard_router
 from core.integrations.router import router as integrations_router
 from verticals.es.router import router as es_router
 from verticals.mga.router import router as mga_router
@@ -43,6 +44,7 @@ async def health() -> dict[str, int]:
 core_router.include_router(integrations_router)
 core_router.include_router(auth_router)
 core_router.include_router(assistant_router)
+core_router.include_router(dashboard_router)
 
 app.include_router(core_router)
 app.include_router(mga_router)
