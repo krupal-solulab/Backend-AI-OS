@@ -6,6 +6,7 @@ The MGA developer mounts each workflow here with a single ``include_router(...)`
 
 from fastapi import APIRouter
 
+from verticals.mga.appetite_governance.router import router as appetite_governance_router
 from verticals.mga.bind_issuance.router import router as bind_issuance_router
 from verticals.mga.broker_copilot.router import router as broker_copilot_router
 from verticals.mga.endorsement_processing.router import router as endorsement_processing_router
@@ -21,3 +22,4 @@ router.include_router(broker_copilot_router)
 router.include_router(endorsement_processing_router)
 router.include_router(quoting_rating_router)
 router.include_router(bind_issuance_router)
+router.include_router(appetite_governance_router)
