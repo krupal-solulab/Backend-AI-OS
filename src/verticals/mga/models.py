@@ -5,9 +5,11 @@
 ``mga_broker_comm_result`` persists the Broker Communication Copilot's drafting output;
 ``mga_endorsement_result`` persists the Endorsement Processing engine's output, including
 the MEP-05 PAS write-back record Bordereau Reporting's completeness check depends on;
-``mga_quoting_result`` persists the Quoting & Rating Support engine's worksheet output —
-all so Phase-4 Governance & Portfolio can read decision history. Portable types only
-(String/JSON), same conventions as the shared base tables.
+``mga_quoting_result`` persists the Quoting & Rating Support engine's worksheet output;
+``mga_bind_result`` persists the Bind Order & Issuance engine's output, including the
+MBI-04 PAS write-back and MBI-05 issuance reconciliation status — all so Phase-4
+Governance & Portfolio can read decision history. Portable types only (String/JSON),
+same conventions as the shared base tables.
 """
 
 from __future__ import annotations
@@ -117,6 +119,25 @@ class MgaQuotingResult(SQLModel, table=True):
     benchmark_flagged: bool = Field(default=False)
     any_adjustment_capped: bool = Field(default=False)
     any_minimum_applied: bool = Field(default=False)
+    created_at: datetime = Field(
+        default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class MgaBindResult(SQLModel, table=True):
+    __tablename__ = "mga_bind_result"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    tenant_id: str = Field(sa_column=Column(String, ForeignKey("tenant.id"), nullable=False))
+    submission_id: str = Field(
+        sa_column=Column(String, ForeignKey("submission.id"), nullable=False)
+    )
+    status: str = Field(sa_column=Column(String, nullable=False, index=True))
+    authority_outcome: str | None = Field(default=None)
+    write_back_logged: bool = Field(default=False)
+    issuance_status: str = Field(sa_column=Column(String, nullable=False))
+    issuance_discrepancy_count: int = Field(default=0)
+    post_bind_obligation_count: int = Field(default=0)
     created_at: datetime = Field(
         default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False)
     )
