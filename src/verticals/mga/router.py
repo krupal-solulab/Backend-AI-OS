@@ -10,6 +10,7 @@ from verticals.mga.appetite_governance.router import router as appetite_governan
 from verticals.mga.bind_issuance.router import router as bind_issuance_router
 from verticals.mga.broker_copilot.router import router as broker_copilot_router
 from verticals.mga.endorsement_processing.router import router as endorsement_processing_router
+from verticals.mga.portfolio_reporting.router import router as portfolio_reporting_router
 from verticals.mga.quoting_rating.router import router as quoting_rating_router
 from verticals.mga.renewal_management.router import router as renewal_management_router
 from verticals.mga.submission_triage import router as submission_triage_router
@@ -23,3 +24,4 @@ router.include_router(endorsement_processing_router)
 router.include_router(quoting_rating_router)
 router.include_router(bind_issuance_router)
 router.include_router(appetite_governance_router)
+router.include_router(portfolio_reporting_router)

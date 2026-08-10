@@ -9,7 +9,10 @@ the MEP-05 PAS write-back record Bordereau Reporting's completeness check depend
 ``mga_bind_result`` persists the Bind Order & Issuance engine's output, including the
 MBI-04 PAS write-back and MBI-05 issuance reconciliation status; ``mga_governance_result``
 persists the Appetite Governance & Audit Trail engine's output — the aggregation layer
-that reads the decision history the other tables here provide. Portable types only
+that reads the decision history the other tables here provide; ``mga_portfolio_result``
+persists the Portfolio & Book Performance Reporting engine's output — the final MGA
+roadmap workflow, itself an aggregation layer over every other workflow's decision
+history plus Appetite Governance's own AG-06 concentration findings. Portable types only
 (String/JSON), same conventions as the shared base tables.
 """
 
@@ -156,6 +159,25 @@ class MgaGovernanceResult(SQLModel, table=True):
     gap_count: int = Field(default=0)
     flagged_finding_count: int = Field(default=0)
     has_audit_report: bool = Field(default=False)
+    created_at: datetime = Field(
+        default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class MgaPortfolioResult(SQLModel, table=True):
+    __tablename__ = "mga_portfolio_result"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    tenant_id: str = Field(sa_column=Column(String, ForeignKey("tenant.id"), nullable=False))
+    submission_id: str = Field(
+        sa_column=Column(String, ForeignKey("submission.id"), nullable=False)
+    )
+    status: str = Field(sa_column=Column(String, nullable=False, index=True))
+    completeness_status: str = Field(sa_column=Column(String, nullable=False))
+    gap_count: int = Field(default=0)
+    has_loss_ratio: bool = Field(default=False)
+    has_renewal_retention: bool = Field(default=False)
+    has_appetite_exposure: bool = Field(default=False)
     created_at: datetime = Field(
         default_factory=_now, sa_column=Column(DateTime(timezone=True), nullable=False)
     )
