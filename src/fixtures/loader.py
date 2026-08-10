@@ -44,22 +44,15 @@ class LoadedSubmission:
 
 
 def _dataset_dir(n: int) -> Path | None:
-    """Resolve ``Workflow_<n>``'s dataset folder. Prefers ``test_dataset`` (Workflow_1);
-    falls back to the single ``*_dataset`` subfolder present (e.g. Workflow_2's
-    ``renewal_dataset``). Tolerant so new workflows need no loader change."""
     root = get_settings().test_data_root
     if not root:
         log.warning("TEST_DATA_ROOT is not set; returning no fixtures.")
         return None
-    base = Path(root) / f"Workflow_{n}"
-    candidate = base / "test_dataset"
-    if candidate.is_dir():
-        return candidate
-    others = sorted(p for p in base.glob("*_dataset") if p.is_dir())
-    if others:
-        return others[0]
-    log.warning("No *_dataset folder for Workflow_%d under %s; returning no fixtures.", n, base)
-    return None
+    dataset = Path(root) / f"Workflow_{n}" / "test_dataset"
+    if not dataset.is_dir():
+        log.warning("Fixture dataset not found at %s; returning no fixtures.", dataset)
+        return None
+    return dataset
 
 
 def load_workflow(
@@ -78,9 +71,9 @@ def load_workflow(
         return []
 
     results: list[LoadedSubmission] = []
-    # Each case is a subfolder (submission_XX / renewal_XX / …) — iterate all dirs so the
-    # loader is agnostic to the case-folder naming convention.
-    for sub_dir in sorted(p for p in dataset.iterdir() if p.is_dir()):
+    for sub_dir in sorted(dataset.glob("submission_*")):
+        if not sub_dir.is_dir():
+            continue
         submission = Submission(
             tenant_id=tenant_id,
             vertical=vertical,
